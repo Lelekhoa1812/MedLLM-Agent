@@ -1829,7 +1829,7 @@ if __name__ == "__main__":
     initialize_medical_model(DEFAULT_MEDICAL_MODEL)
     logger.info("Preloading Whisper model...")
     try:
-    initialize_whisper_model()
+        initialize_whisper_model()
         if global_whisper_model is not None:
             logger.info("Whisper model preloaded successfully!")
         else:
