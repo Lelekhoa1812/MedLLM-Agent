@@ -9,6 +9,8 @@ app_file: app.py
 pinned: false
 license: mit
 short_description: 'MedicalMCP RAG & Search with MedSwin'
+tags:
+  - mcp-in-action-track-enterprise
 ---
 
 # 🩺 MedLLM Agent
