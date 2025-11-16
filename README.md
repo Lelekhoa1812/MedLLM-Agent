@@ -50,6 +50,11 @@ tags:
 - Responses translated back to original language
 - Powered by DeepSeek-R1-8B for translation
 
+### 🎤 **Voice Features**
+- **Speech-to-Text**: Microphone icon for voice input transcription using OpenAI Whisper Large-v3-Turbo
+- **Text-to-Speech**: Speaker icon in responses to generate voice output using Maya1 TTS model
+- Both models preloaded on startup for instant voice interactions
+
 ### ⚙️ **Advanced Configuration**
 - Customizable generation parameters (temperature, top-p, top-k)
 - Adjustable retrieval settings (top-k, merge threshold)
@@ -74,6 +79,8 @@ tags:
 
 - **Medical Models**: MedSwin/MedSwin-7B-SFT, MedSwin-7B-KD, MedSwin-Merged-TA-SFT-0.7
 - **Translation Model**: deepseek-ai/DeepSeek-R1-0528-Qwen3-8B
+- **Speech-to-Text**: openai/whisper-large-v3-turbo
+- **Text-to-Speech**: maya-research/maya1
 - **Embedding Model**: abhinand/MedEmbed-large-v0.1 (domain-tuned medical embeddings)
 - **RAG Framework**: LlamaIndex with hierarchical node parsing
 - **Web Search**: DuckDuckGo with content extraction and summarization
