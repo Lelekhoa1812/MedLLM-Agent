@@ -498,28 +498,28 @@ def create_execution_plan(reasoning: dict, query: str, has_rag_index: bool) -> d
     logger.info(f"Execution plan created: {len(plan['steps'])} steps")
     return plan
 
-def autonomous_execution_strategy(reasoning: dict, plan: dict, use_rag: bool, use_web_search: bool) -> dict:
+def autonomous_execution_strategy(reasoning: dict, plan: dict, use_rag: bool, use_web_search: bool, has_rag_index: bool) -> dict:
     """
     Autonomous execution: Make decisions on information gathering strategy.
-    Overrides user settings if reasoning suggests better approach.
+    Only suggests web search override, but respects user's RAG disable setting.
     """
     strategy = {
-        "use_rag": use_rag,
+        "use_rag": use_rag,  # Respect user's RAG setting
         "use_web_search": use_web_search,
         "reasoning_override": False,
         "rationale": ""
     }
     
-    # Autonomous decision: Override if reasoning suggests different approach
-    if reasoning.get("requires_rag", False) and not use_rag:
-        strategy["use_rag"] = True
-        strategy["reasoning_override"] = True
-        strategy["rationale"] += "Reasoning suggests RAG is needed for this query. "
-    
+    # Only suggest web search override (RAG requires documents, so we respect user's choice)
     if reasoning.get("requires_web_search", False) and not use_web_search:
         strategy["use_web_search"] = True
         strategy["reasoning_override"] = True
         strategy["rationale"] += "Reasoning suggests web search for current information. "
+    
+    # Note: We don't override RAG setting because:
+    # 1. User may have explicitly disabled it
+    # 2. RAG requires documents to be uploaded
+    # 3. We should respect user's explicit choice
     
     if strategy["reasoning_override"]:
         logger.info(f"Autonomous override: {strategy['rationale']}")
@@ -751,10 +751,10 @@ def stream_chat(
     
     # ===== AUTONOMOUS EXECUTION STRATEGY =====
     logger.info("🎯 Determining execution strategy...")
-    execution_strategy = autonomous_execution_strategy(reasoning, plan, use_rag, use_web_search)
+    execution_strategy = autonomous_execution_strategy(reasoning, plan, use_rag, use_web_search, has_rag_index)
     
-    # Use autonomous strategy decisions
-    final_use_rag = execution_strategy["use_rag"]
+    # Use autonomous strategy decisions (respect user's RAG setting)
+    final_use_rag = execution_strategy["use_rag"] and has_rag_index  # Only use RAG if enabled AND documents exist
     final_use_web_search = execution_strategy["use_web_search"]
     
     # Show reasoning override message if applicable
@@ -777,10 +777,6 @@ def stream_chat(
     
     # Adjust system prompt based on RAG setting and reasoning
     if final_use_rag:
-        if not has_rag_index:
-            yield history + [{"role": "assistant", "content": "Please upload documents first to use RAG."}]
-            return
-        
         base_system_prompt = system_prompt if system_prompt else "As a medical specialist, provide clinical and concise answers based on the provided medical documents and context."
     else:
         base_system_prompt = "As a medical specialist, provide short and concise clinical answers. Be brief and avoid lengthy explanations. Focus on key medical facts only."
@@ -1027,9 +1023,9 @@ def create_demo():
                 with gr.Accordion("⚙️ Advanced Settings", open=False):
                     with gr.Row():
                         use_rag = gr.Checkbox(
-                            value=True,
+                            value=False,
                             label="Enable Document RAG",
-                            info="Answer based on uploaded documents"
+                            info="Answer based on uploaded documents (requires document upload)"
                         )
                         use_web_search = gr.Checkbox(
                             value=False,

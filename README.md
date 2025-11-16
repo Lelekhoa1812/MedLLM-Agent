@@ -16,6 +16,8 @@ tags:
   - building-mcp-track-creative
 ---
 
+[Demo](https://huggingface.co/spaces/MCP-1st-Birthday/MedLLM-Agent)  
+
 # 🩺 MedLLM Agent
 
 **Advanced Medical AI Assistant** powered by fine-tuned MedSwin models with comprehensive knowledge retrieval capabilities.
