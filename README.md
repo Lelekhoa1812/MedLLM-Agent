@@ -67,7 +67,7 @@ short_description: 'MedicalMCP RAG & Search with MedSwin'
 
 - **Medical Models**: MedSwin/MedSwin-7B-SFT, MedSwin-7B-KD, MedSwin-Merged-TA-SFT-0.7
 - **Translation Model**: meta-llama/Meta-Llama-3.1-8B-Instruct
-- **Embedding Model**: sentence-transformers/all-MiniLM-L6-v2
+- **Embedding Model**: abhinand/MedEmbed-large-v0.1 (domain-tuned medical embeddings)
 - **RAG Framework**: LlamaIndex with hierarchical node parsing
 - **Web Search**: DuckDuckGo with content extraction and summarization
 

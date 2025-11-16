@@ -49,7 +49,7 @@ MEDSWIN_MODELS = {
     "MedSwin TA": "MedSwin/MedSwin-Merged-TA-SFT-0.7"
 }
 DEFAULT_MEDICAL_MODEL = "MedSwin SFT"
-EMBEDDING_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
+EMBEDDING_MODEL = "abhinand/MedEmbed-large-v0.1"  # Domain-tuned medical embedding model
 HF_TOKEN = os.environ.get("HF_TOKEN")
 if not HF_TOKEN:
     raise ValueError("HF_TOKEN not found in environment variables")
