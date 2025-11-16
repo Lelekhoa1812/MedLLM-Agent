@@ -19,6 +19,7 @@ nest-asyncio
 # Fallback dependencies (used if MCP is not available)
 requests
 beautifulsoup4
+ddgs
 spaces
 openai-whisper
 soundfile
