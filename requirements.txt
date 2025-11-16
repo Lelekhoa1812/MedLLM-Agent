@@ -12,10 +12,13 @@ accelerate
 sentencepiece>=0.1.99
 google-genai
 langdetect
+gradio
+# MCP dependencies (preferred)
+mcp
+nest-asyncio
+# Fallback dependencies (used if MCP is not available)
 requests
 beautifulsoup4
-ddgs
-gradio
 spaces
 openai-whisper
 soundfile

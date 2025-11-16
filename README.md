@@ -31,10 +31,12 @@ tags:
 - Toggle RAG on/off - when disabled, provides concise clinical answers without document context
 
 ### 🌐 **Web Search Integration (MCP Protocol)**
-- Fetch knowledge from reliable online medical resources
-- Automatic summarization of web search results using DeepSeek-R1
-- Enriches context for medical specialist models
-- Combines document RAG + web sources for comprehensive answers
+- **Native MCP Support**: Uses Model Context Protocol (MCP) tools for web search and content extraction
+- **Automatic Fallback**: Gracefully falls back to direct library calls if MCP is not configured
+- **Configurable MCP Servers**: Connect to any MCP-compatible search server via environment variables
+- **Content Extraction**: Automatically fetches and extracts full content from search results using MCP tools
+- **Automatic Summarization**: Summarizes web search results using DeepSeek-R1
+- **Enriches Context**: Combines document RAG + web sources for comprehensive answers
 
 ### 🧠 **MedSwin Medical Specialist Models**
 - **MedSwin SFT** (default) - Supervised Fine-Tuned model
@@ -83,16 +85,47 @@ tags:
 - **Text-to-Speech**: maya-research/maya1
 - **Embedding Model**: abhinand/MedEmbed-large-v0.1 (domain-tuned medical embeddings)
 - **RAG Framework**: LlamaIndex with hierarchical node parsing
-- **Web Search**: DuckDuckGo with content extraction and summarization
+- **Web Search**: Model Context Protocol (MCP) tools with automatic fallback to DuckDuckGo
+- **MCP Client**: Python MCP SDK for standardized tool integration
 
 ## 📋 Requirements
 
 See `requirements.txt` for full dependency list. Key dependencies:
-- transformers, torch
-- llama-index
-- langdetect
-- duckduckgo-search
-- gradio, spaces
+- **MCP Integration**: `mcp`, `nest-asyncio` (primary - for MCP protocol support)
+- **Fallback Dependencies**: `requests`, `beautifulsoup4` (used when MCP is not available)
+- **Core ML**: `transformers`, `torch`
+- **RAG Framework**: `llama-index`
+- **Utilities**: `langdetect`, `gradio`, `spaces`
+
+### MCP Configuration (Optional)
+
+The application uses MCP tools by default when available. To configure MCP servers:
+
+1. **Install MCP Python SDK** (already in requirements.txt):
+   ```bash
+   pip install mcp nest-asyncio
+   ```
+
+2. **Install an MCP Server** (e.g., DuckDuckGo MCP server):
+   ```bash
+   pip install duckduckgo-mcp-server
+   # OR using npx (Node.js):
+   # npx -y @modelcontextprotocol/server-duckduckgo
+   ```
+
+3. **Configure via Environment Variables** (optional):
+   ```bash
+   export MCP_SERVER_COMMAND="python"
+   export MCP_SERVER_ARGS="-m duckduckgo_mcp_server"
+   ```
+   
+   Or for Node.js-based MCP servers:
+   ```bash
+   export MCP_SERVER_COMMAND="npx"
+   export MCP_SERVER_ARGS="-y @modelcontextprotocol/server-duckduckgo"
+   ```
+
+**Note**: If MCP is not configured, the application automatically falls back to direct library calls (`requests`, `BeautifulSoup`) for web search functionality. For full fallback support including DuckDuckGo search, you may need to install `ddgs` separately, though it's recommended to use MCP for better integration and reliability.
 
 ## 🎯 Use Cases
 
@@ -163,6 +196,7 @@ MedLLM Agent is designed to support **doctors, clinicians, and medical specialis
   - Recent clinical trial results
   - Updated drug information
   - Current medical guidelines
+- **MCP Protocol Benefits**: Standardized, modular tool integration allows easy switching between search providers and enhanced reliability
 
 ### **How It Works: Autonomous Reasoning in Action**
 
@@ -181,7 +215,8 @@ MedLLM Agent is designed to support **doctors, clinicians, and medical specialis
 
 3. **Autonomous Execution** → System executes plan:
    - Retrieves relevant patient history from documents
-   - Searches web for latest ADA/ADA-EASD guidelines
+   - Searches web for latest ADA/ADA-EASD guidelines using MCP tools
+   - Fetches and extracts full content from search results via MCP
    - Synthesizes information considering age and renal function
    - Generates evidence-based treatment recommendations
 
@@ -198,7 +233,8 @@ MedLLM Agent is designed to support **doctors, clinicians, and medical specialis
 ✅ **Comprehensive Coverage**: Combines institutional knowledge (documents) with current medical knowledge (web)  
 ✅ **Quality Assurance**: Self-reflection ensures high-quality, complete answers  
 ✅ **Scalability**: Handles multiple languages, complex queries, and large document libraries  
-✅ **Clinical Workflow Integration**: Designed to fit into existing clinical decision-making processes
+✅ **Clinical Workflow Integration**: Designed to fit into existing clinical decision-making processes  
+✅ **MCP Protocol**: Standardized tool integration for reliable, maintainable web search capabilities
 
 ### **Implementation in Clinical Settings**
 

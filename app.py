@@ -33,10 +33,24 @@ from llama_index.llms.huggingface import HuggingFaceLLM
 from llama_index.embeddings.huggingface import HuggingFaceEmbedding
 from tqdm import tqdm
 from langdetect import detect, LangDetectException
-from ddgs import DDGS
-import requests
-from bs4 import BeautifulSoup
 import whisper
+# MCP imports
+try:
+    from mcp import ClientSession, StdioServerParameters
+    from mcp.client.stdio import stdio_client
+    import asyncio
+    try:
+        import nest_asyncio
+        nest_asyncio.apply()  # Allow nested event loops
+    except ImportError:
+        pass  # nest_asyncio is optional
+    MCP_AVAILABLE = True
+except ImportError:
+    MCP_AVAILABLE = False
+    # Fallback imports if MCP is not available
+    from ddgs import DDGS
+    import requests
+    from bs4 import BeautifulSoup
 try:
     from TTS.api import TTS
     TTS_AVAILABLE = True
@@ -175,6 +189,14 @@ global_medical_tokenizers = {}
 global_file_info = {}
 global_whisper_model = None
 global_tts_model = None
+
+# MCP client storage
+global_mcp_client = None
+# MCP server configuration via environment variables
+# Example: MCP_SERVER_COMMAND="python" MCP_SERVER_ARGS="-m duckduckgo_mcp_server"
+# Or: MCP_SERVER_COMMAND="npx" MCP_SERVER_ARGS="-y @modelcontextprotocol/server-duckduckgo"
+MCP_SERVER_COMMAND = os.environ.get("MCP_SERVER_COMMAND", "python")
+MCP_SERVER_ARGS = os.environ.get("MCP_SERVER_ARGS", "-m duckduckgo_mcp_server").split() if os.environ.get("MCP_SERVER_ARGS") else ["-m", "duckduckgo_mcp_server"]
 
 def initialize_translation_model():
     """Initialize DeepSeek-R1 model for translation purposes"""
@@ -374,8 +396,143 @@ def translate_text(text: str, target_lang: str = "en", source_lang: str = None) 
     response = global_translation_tokenizer.decode(outputs[0][inputs['input_ids'].shape[1]:], skip_special_tokens=True)
     return response.strip()
 
-def search_web(query: str, max_results: int = 5) -> list:
-    """Search web using DuckDuckGo and extract content"""
+async def search_web_mcp(query: str, max_results: int = 5) -> list:
+    """Search web using MCP tools"""
+    global global_mcp_client
+    
+    if not MCP_AVAILABLE:
+        logger.warning("MCP not available, falling back to direct search")
+        return search_web_fallback(query, max_results)
+    
+    try:
+        # Initialize MCP client if not already initialized
+        if global_mcp_client is None:
+            logger.info(f"Initializing MCP client with command: {MCP_SERVER_COMMAND} {MCP_SERVER_ARGS}")
+            # Try to connect to MCP server
+            # This assumes MCP server is running via stdio
+            server_params = StdioServerParameters(
+                command=MCP_SERVER_COMMAND,
+                args=MCP_SERVER_ARGS
+            )
+            try:
+                global_mcp_client = await stdio_client(server_params)
+                await global_mcp_client.__aenter__()
+                logger.info("MCP client initialized successfully")
+            except Exception as e:
+                logger.error(f"Failed to initialize MCP client: {e}")
+                logger.info("Falling back to direct search. To use MCP, ensure MCP server is installed and configured.")
+                return search_web_fallback(query, max_results)
+        
+        # Call MCP search tool
+        try:
+            tools = await global_mcp_client.list_tools()
+        except Exception as e:
+            logger.error(f"Failed to list MCP tools: {e}")
+            return search_web_fallback(query, max_results)
+        
+        search_tool = None
+        for tool in tools.tools:
+            if "search" in tool.name.lower() or "duckduckgo" in tool.name.lower():
+                search_tool = tool
+                logger.info(f"Found MCP search tool: {tool.name}")
+                break
+        
+        if search_tool:
+            # Execute search via MCP
+            try:
+                result = await global_mcp_client.call_tool(
+                    search_tool.name,
+                    arguments={"query": query, "max_results": max_results}
+                )
+            except Exception as e:
+                logger.error(f"Error calling MCP search tool: {e}")
+                return search_web_fallback(query, max_results)
+            
+            # Parse MCP result
+            web_content = []
+            if hasattr(result, 'content') and result.content:
+                for item in result.content:
+                    if hasattr(item, 'text'):
+                        # Parse JSON response from MCP
+                        import json
+                        try:
+                            data = json.loads(item.text)
+                            if isinstance(data, list):
+                                for entry in data[:max_results]:
+                                    web_content.append({
+                                        'title': entry.get('title', ''),
+                                        'url': entry.get('url', entry.get('href', '')),
+                                        'content': entry.get('body', entry.get('snippet', entry.get('content', '')))
+                                    })
+                            elif isinstance(data, dict):
+                                web_content.append({
+                                    'title': data.get('title', ''),
+                                    'url': data.get('url', data.get('href', '')),
+                                    'content': data.get('body', data.get('snippet', data.get('content', '')))
+                                })
+                        except json.JSONDecodeError:
+                            # If not JSON, treat as plain text
+                            web_content.append({
+                                'title': '',
+                                'url': '',
+                                'content': item.text
+                            })
+            
+            # If MCP search didn't return results, try fetching content via MCP fetch tool
+            if web_content:
+                # Try to fetch full content for each result using MCP fetch tool
+                fetch_tool = None
+                for tool in tools.tools:
+                    if "fetch" in tool.name.lower() or "scrape" in tool.name.lower() or "get" in tool.name.lower():
+                        fetch_tool = tool
+                        logger.info(f"Found MCP fetch tool: {tool.name}")
+                        break
+                
+                if fetch_tool:
+                    for item in web_content[:3]:  # Fetch content for top 3 results
+                        if not item.get('url'):
+                            continue
+                        try:
+                            fetch_result = await global_mcp_client.call_tool(
+                                fetch_tool.name,
+                                arguments={"url": item['url']}
+                            )
+                            if hasattr(fetch_result, 'content') and fetch_result.content:
+                                for content_item in fetch_result.content:
+                                    if hasattr(content_item, 'text'):
+                                        # Extract text content
+                                        full_text = content_item.text
+                                        if len(full_text) > 1000:
+                                            full_text = full_text[:1000] + "..."
+                                        item['content'] = item.get('content', '') + "\n" + full_text[:500]
+                        except Exception as e:
+                            logger.debug(f"Could not fetch content for {item['url']}: {e}")
+                            continue
+            
+            if web_content:
+                logger.info(f"MCP search returned {len(web_content)} results")
+                return web_content
+            else:
+                logger.warning("MCP search returned no results, falling back to direct search")
+                return search_web_fallback(query, max_results)
+        else:
+            logger.warning("MCP search tool not found, falling back to direct search")
+            return search_web_fallback(query, max_results)
+            
+    except Exception as e:
+        logger.error(f"MCP web search error: {e}, falling back to direct search")
+        import traceback
+        logger.debug(traceback.format_exc())
+        return search_web_fallback(query, max_results)
+
+def search_web_fallback(query: str, max_results: int = 5) -> list:
+    """Fallback web search using DuckDuckGo directly (when MCP is not available)"""
+    if not MCP_AVAILABLE:
+        # Use direct library calls as fallback
+        from ddgs import DDGS
+        import requests
+        from bs4 import BeautifulSoup
+    
     try:
         with DDGS() as ddgs:
             results = list(ddgs.text(query, max_results=max_results))
@@ -425,6 +582,36 @@ def search_web(query: str, max_results: int = 5) -> list:
     except Exception as e:
         logger.error(f"Web search error: {e}")
         return []
+
+def search_web(query: str, max_results: int = 5) -> list:
+    """Search web using MCP tools (synchronous wrapper)"""
+    if MCP_AVAILABLE:
+        try:
+            # Run async MCP search
+            try:
+                loop = asyncio.get_event_loop()
+            except RuntimeError:
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+            
+            if loop.is_running():
+                # If loop is already running, use nest_asyncio or create new thread
+                try:
+                    import nest_asyncio
+                    return nest_asyncio.run(search_web_mcp(query, max_results))
+                except (ImportError, AttributeError):
+                    # Fallback: run in thread
+                    import concurrent.futures
+                    with concurrent.futures.ThreadPoolExecutor() as executor:
+                        future = executor.submit(asyncio.run, search_web_mcp(query, max_results))
+                        return future.result(timeout=30)
+            else:
+                return loop.run_until_complete(search_web_mcp(query, max_results))
+        except Exception as e:
+            logger.error(f"Error running async MCP search: {e}")
+            return search_web_fallback(query, max_results)
+    else:
+        return search_web_fallback(query, max_results)
 
 def summarize_web_content(content_list: list, query: str) -> str:
     """Summarize web search results using DeepSeek-R1 model"""
