@@ -43,7 +43,7 @@ logger = logging.getLogger(__name__)
 hf_logging.set_verbosity_error()
 
 # Model configurations
-TRANSLATION_MODEL = "meta-llama/Meta-Llama-3.1-8B-Instruct"
+TRANSLATION_MODEL = "deepseek-ai/DeepSeek-R1-0528-Qwen3-8B"
 MEDSWIN_MODELS = {
     "MedSwin SFT": "MedSwin/MedSwin-7B-SFT",
     "MedSwin KD": "MedSwin/MedSwin-7B-KD",
@@ -163,10 +163,10 @@ global_medical_tokenizers = {}
 global_file_info = {}
 
 def initialize_translation_model():
-    """Initialize Llama model for translation purposes"""
+    """Initialize DeepSeek-R1 model for translation purposes"""
     global global_translation_model, global_translation_tokenizer
     if global_translation_model is None or global_translation_tokenizer is None:
-        logger.info("Initializing translation model (Llama-8B)...")
+        logger.info("Initializing translation model (DeepSeek-R1-8B)...")
         global_translation_tokenizer = AutoTokenizer.from_pretrained(TRANSLATION_MODEL, token=HF_TOKEN)
         global_translation_model = AutoModelForCausalLM.from_pretrained(
             TRANSLATION_MODEL,
@@ -205,7 +205,7 @@ def detect_language(text: str) -> str:
         return "en"  # Default to English if detection fails
 
 def translate_text(text: str, target_lang: str = "en", source_lang: str = None) -> str:
-    """Translate text using Llama model"""
+    """Translate text using DeepSeek-R1 model"""
     global global_translation_model, global_translation_tokenizer
     if global_translation_model is None or global_translation_tokenizer is None:
         initialize_translation_model()
@@ -293,7 +293,7 @@ def search_web(query: str, max_results: int = 5) -> list:
         return []
 
 def summarize_web_content(content_list: list, query: str) -> str:
-    """Summarize web search results using Llama model"""
+    """Summarize web search results using DeepSeek-R1 model"""
     global global_translation_model, global_translation_tokenizer
     if global_translation_model is None or global_translation_tokenizer is None:
         initialize_translation_model()

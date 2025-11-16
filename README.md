@@ -30,7 +30,7 @@ tags:
 
 ### 🌐 **Web Search Integration (MCP Protocol)**
 - Fetch knowledge from reliable online medical resources
-- Automatic summarization of web search results using Llama-8B
+- Automatic summarization of web search results using DeepSeek-R1
 - Enriches context for medical specialist models
 - Combines document RAG + web sources for comprehensive answers
 
@@ -46,7 +46,7 @@ tags:
 - Non-English queries automatically translated to English
 - Medical model processes in English
 - Responses translated back to original language
-- Powered by Llama-3.1-8B-Instruct for translation
+- Powered by DeepSeek-R1-8B for translation
 
 ### ⚙️ **Advanced Configuration**
 - Customizable generation parameters (temperature, top-p, top-k)
@@ -71,7 +71,7 @@ tags:
 ## 🔧 Technical Details
 
 - **Medical Models**: MedSwin/MedSwin-7B-SFT, MedSwin-7B-KD, MedSwin-Merged-TA-SFT-0.7
-- **Translation Model**: meta-llama/Meta-Llama-3.1-8B-Instruct
+- **Translation Model**: deepseek-ai/DeepSeek-R1-0528-Qwen3-8B
 - **Embedding Model**: abhinand/MedEmbed-large-v0.1 (domain-tuned medical embeddings)
 - **RAG Framework**: LlamaIndex with hierarchical node parsing
 - **Web Search**: DuckDuckGo with content extraction and summarization
