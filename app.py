@@ -281,6 +281,35 @@ def generate_speech(text: str):
         logger.error(f"TTS error: {e}")
         return None
 
+def format_prompt_manually(messages: list, tokenizer) -> str:
+    """Manually format prompt for models without chat template"""
+    prompt_parts = []
+    
+    # Combine system and user messages into a single instruction
+    system_content = ""
+    user_content = ""
+    
+    for msg in messages:
+        role = msg.get("role", "user")
+        content = msg.get("content", "")
+        
+        if role == "system":
+            system_content = content
+        elif role == "user":
+            user_content = content
+        elif role == "assistant":
+            # Skip assistant messages in history for now (can be added if needed)
+            pass
+    
+    # Format for MedAlpaca/LLaMA-based medical models
+    # Common format: Instruction + Input -> Response
+    if system_content:
+        prompt = f"{system_content}\n\nQuestion: {user_content}\n\nAnswer:"
+    else:
+        prompt = f"Question: {user_content}\n\nAnswer:"
+    
+    return prompt
+
 def detect_language(text: str) -> str:
     """Detect language of input text"""
     try:
@@ -943,11 +972,21 @@ def stream_chat(
     max_new_tokens = int(max_new_tokens) if isinstance(max_new_tokens, (int, float)) else 2048
     max_new_tokens = max(max_new_tokens, 1024)  # Minimum 1024 tokens for medical answers
     
-    prompt = medical_tokenizer.apply_chat_template(
-        messages,
-        tokenize=False,
-        add_generation_prompt=True
-    )
+    # Check if tokenizer has chat template, otherwise format manually
+    if hasattr(medical_tokenizer, 'chat_template') and medical_tokenizer.chat_template is not None:
+        try:
+            prompt = medical_tokenizer.apply_chat_template(
+                messages,
+                tokenize=False,
+                add_generation_prompt=True
+            )
+        except Exception as e:
+            logger.warning(f"Chat template failed, using manual formatting: {e}")
+            # Fallback to manual formatting
+            prompt = format_prompt_manually(messages, medical_tokenizer)
+    else:
+        # Manual formatting for models without chat template
+        prompt = format_prompt_manually(messages, medical_tokenizer)
     
     inputs = medical_tokenizer(prompt, return_tensors="pt").to(medical_model_obj.device)
     prompt_length = inputs['input_ids'].shape[1]
@@ -1207,7 +1246,7 @@ def create_demo():
                             minimum=0,
                             maximum=1,
                             step=0.1,
-                            value=0.7,  
+                            value=0.2,  
                             label="Temperature"
                         )
                         max_new_tokens = gr.Slider(
@@ -1222,7 +1261,7 @@ def create_demo():
                             minimum=0.0,
                             maximum=1.0,
                             step=0.1,
-                            value=0.95, 
+                            value=0.7, 
                             label="Top P"
                         )
                         top_k = gr.Slider(
