@@ -1604,13 +1604,13 @@ def create_demo():
                         lines=1,
                         scale=10
                     )
-                        mic_button = gr.Audio(
-                            sources=["microphone"],
-                            type="filepath",
-                            label="",
-                            show_label=False,
-                        container=False,
-                        scale=1
+                    mic_button = gr.Audio(
+                        sources=["microphone"],
+                        type="filepath",
+                        label="",
+                        show_label=False,
+                    container=False,
+                    scale=1
                     )
                     submit_button = gr.Button("➤", elem_classes="submit-btn", scale=1)
                 
