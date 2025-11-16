@@ -11,6 +11,9 @@ license: mit
 short_description: 'MedicalMCP RAG & Search with MedSwin'
 tags:
   - mcp-in-action-track-enterprise
+  - mcp-in-action-track-creative
+  - building-mcp-track-enterprise
+  - building-mcp-track-creative
 ---
 
 # 🩺 MedLLM Agent
