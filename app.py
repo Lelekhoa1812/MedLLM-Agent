@@ -197,13 +197,73 @@ global_whisper_model = None
 global_tts_model = None
 
 # MCP client storage
-global_mcp_client = None
-global_mcp_context = None  # Store the context manager
+global_mcp_session = None
+global_mcp_stdio_ctx = None  # Store stdio context to keep it alive
+global_mcp_lock = threading.Lock()  # Lock for thread-safe session access
 # MCP server configuration via environment variables
 # Example: MCP_SERVER_COMMAND="python" MCP_SERVER_ARGS="-m duckduckgo_mcp_server"
 # Or: MCP_SERVER_COMMAND="npx" MCP_SERVER_ARGS="-y @modelcontextprotocol/server-duckduckgo"
 MCP_SERVER_COMMAND = os.environ.get("MCP_SERVER_COMMAND", "python")
 MCP_SERVER_ARGS = os.environ.get("MCP_SERVER_ARGS", "-m duckduckgo_mcp_server").split() if os.environ.get("MCP_SERVER_ARGS") else ["-m", "duckduckgo_mcp_server"]
+
+async def get_mcp_session():
+    """Get or create MCP client session with proper context management"""
+    global global_mcp_session, global_mcp_stdio_ctx
+    
+    if not MCP_AVAILABLE:
+        return None
+    
+    # Check if session exists and is still valid
+    if global_mcp_session is not None:
+        try:
+            # Test if session is still alive by listing tools
+            await global_mcp_session.list_tools()
+            return global_mcp_session
+        except Exception as e:
+            logger.debug(f"Existing MCP session invalid, recreating: {e}")
+            # Clean up old session
+            try:
+                if global_mcp_session is not None:
+                    await global_mcp_session.__aexit__(None, None, None)
+            except:
+                pass
+            try:
+                if global_mcp_stdio_ctx is not None:
+                    await global_mcp_stdio_ctx.__aexit__(None, None, None)
+            except:
+                pass
+            global_mcp_session = None
+            global_mcp_stdio_ctx = None
+    
+    # Create new session using correct MCP SDK pattern
+    try:
+        logger.info(f"Creating MCP client session with command: {MCP_SERVER_COMMAND} {MCP_SERVER_ARGS}")
+        server_params = StdioServerParameters(
+            command=MCP_SERVER_COMMAND,
+            args=MCP_SERVER_ARGS
+        )
+        
+        # Correct MCP SDK usage: stdio_client is an async context manager
+        # that yields (read, write) streams
+        stdio_ctx = stdio_client(server_params)
+        read, write = await stdio_ctx.__aenter__()
+        
+        # Create ClientSession from the streams
+        session = ClientSession(read, write)
+        await session.__aenter__()
+        
+        # Store both the session and stdio context to keep them alive
+        global_mcp_session = session
+        global_mcp_stdio_ctx = stdio_ctx
+        logger.info("MCP client session created successfully")
+        return session
+    except Exception as e:
+        logger.error(f"Failed to create MCP client session: {e}")
+        import traceback
+        logger.debug(traceback.format_exc())
+        global_mcp_session = None
+        global_mcp_stdio_ctx = None
+        return None
 
 def initialize_translation_model():
     """Initialize DeepSeek-R1 model for translation purposes"""
@@ -310,18 +370,17 @@ def initialize_tts_model():
 
 async def transcribe_audio_mcp(audio_path: str) -> str:
     """Transcribe audio using MCP Whisper tool"""
-    global global_mcp_client
-    
     if not MCP_AVAILABLE:
         return ""
     
     try:
-        # Initialize MCP client if needed
-        if global_mcp_client is None:
+        # Get MCP session
+        session = await get_mcp_session()
+        if session is None:
             return ""
         
         # Find Whisper tool
-        tools = await global_mcp_client.list_tools()
+        tools = await session.list_tools()
         whisper_tool = None
         for tool in tools.tools:
             if "whisper" in tool.name.lower() or "transcribe" in tool.name.lower() or "speech" in tool.name.lower():
@@ -330,7 +389,7 @@ async def transcribe_audio_mcp(audio_path: str) -> str:
                 break
         
         if whisper_tool:
-            result = await global_mcp_client.call_tool(
+            result = await session.call_tool(
                 whisper_tool.name,
                 arguments={"audio_path": audio_path, "language": "en"}
             )
@@ -406,18 +465,17 @@ def transcribe_audio(audio):
 
 async def generate_speech_mcp(text: str) -> str:
     """Generate speech using MCP TTS tool"""
-    global global_mcp_client
-    
     if not MCP_AVAILABLE:
         return None
     
     try:
-        # Initialize MCP client if needed
-        if global_mcp_client is None:
+        # Get MCP session
+        session = await get_mcp_session()
+        if session is None:
             return None
         
         # Find TTS tool
-        tools = await global_mcp_client.list_tools()
+        tools = await session.list_tools()
         tts_tool = None
         for tool in tools.tools:
             if "tts" in tool.name.lower() or "speech" in tool.name.lower() or "synthesize" in tool.name.lower():
@@ -426,7 +484,7 @@ async def generate_speech_mcp(text: str) -> str:
                 break
         
         if tts_tool:
-            result = await global_mcp_client.call_tool(
+            result = await session.call_tool(
                 tts_tool.name,
                 arguments={"text": text, "language": "en"}
             )
@@ -538,18 +596,17 @@ def detect_language(text: str) -> str:
 
 async def translate_text_mcp(text: str, target_lang: str = "en", source_lang: str = None) -> str:
     """Translate text using MCP translation tool"""
-    global global_mcp_client
-    
     if not MCP_AVAILABLE:
         return ""
     
     try:
-        # Initialize MCP client if needed
-        if global_mcp_client is None:
+        # Get MCP session
+        session = await get_mcp_session()
+        if session is None:
             return ""
         
         # Find translation tool
-        tools = await global_mcp_client.list_tools()
+        tools = await session.list_tools()
         translate_tool = None
         for tool in tools.tools:
             if "translate" in tool.name.lower() or "translation" in tool.name.lower():
@@ -562,7 +619,7 @@ async def translate_text_mcp(text: str, target_lang: str = "en", source_lang: st
             if source_lang:
                 args["source_language"] = source_lang
             
-            result = await global_mcp_client.call_tool(
+            result = await session.call_tool(
                 translate_tool.name,
                 arguments=args
             )
@@ -637,36 +694,20 @@ def translate_text(text: str, target_lang: str = "en", source_lang: str = None) 
 
 async def search_web_mcp(query: str, max_results: int = 5) -> list:
     """Search web using MCP tools"""
-    global global_mcp_client, global_mcp_context
-    
     if not MCP_AVAILABLE:
         logger.warning("MCP not available, falling back to direct search")
         return search_web_fallback(query, max_results)
     
     try:
-        # Initialize MCP client if not already initialized
-        if global_mcp_client is None:
-            logger.info(f"Initializing MCP client with command: {MCP_SERVER_COMMAND} {MCP_SERVER_ARGS}")
-            # Try to connect to MCP server
-            # This assumes MCP server is running via stdio
-            server_params = StdioServerParameters(
-                command=MCP_SERVER_COMMAND,
-                args=MCP_SERVER_ARGS
-            )
-            try:
-                global_mcp_client = await stdio_client(server_params)
-                await global_mcp_client.__aenter__()
-                logger.info("MCP client initialized successfully")
-            except Exception as e:
-                logger.error(f"Failed to initialize MCP client: {e}")
-                logger.info("Falling back to direct search. To use MCP, ensure MCP server is installed and configured.")
-                global_mcp_client = None
-                global_mcp_context = None
-                return search_web_fallback(query, max_results)
+        # Get MCP session
+        session = await get_mcp_session()
+        if session is None:
+            logger.warning("Failed to get MCP session, falling back to direct search")
+            return search_web_fallback(query, max_results)
         
         # Call MCP search tool
         try:
-            tools = await global_mcp_client.list_tools()
+            tools = await session.list_tools()
         except Exception as e:
             logger.error(f"Failed to list MCP tools: {e}")
             return search_web_fallback(query, max_results)
@@ -681,7 +722,7 @@ async def search_web_mcp(query: str, max_results: int = 5) -> list:
         if search_tool:
             # Execute search via MCP
             try:
-                result = await global_mcp_client.call_tool(
+                result = await session.call_tool(
                     search_tool.name,
                     arguments={"query": query, "max_results": max_results}
                 )
@@ -734,7 +775,7 @@ async def search_web_mcp(query: str, max_results: int = 5) -> list:
                         if not item.get('url'):
                             continue
                         try:
-                            fetch_result = await global_mcp_client.call_tool(
+                            fetch_result = await session.call_tool(
                                 fetch_tool.name,
                                 arguments={"url": item['url']}
                             )
