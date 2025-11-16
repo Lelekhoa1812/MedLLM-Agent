@@ -73,7 +73,7 @@ MEDSWIN_MODELS = {
     "MedSwin KD": "MedSwin/MedSwin-7B-KD",
     "MedSwin TA": "MedSwin/MedSwin-Merged-TA-SFT-0.7"
 }
-DEFAULT_MEDICAL_MODEL = "MedSwin SFT"
+DEFAULT_MEDICAL_MODEL = "MedSwin TA"
 EMBEDDING_MODEL = "abhinand/MedEmbed-large-v0.1"  # Domain-tuned medical embedding model
 WHISPER_MODEL = "openai/whisper-large-v3-turbo"
 TTS_MODEL = "maya-research/maya1"
@@ -1592,7 +1592,7 @@ def create_demo():
             with gr.Column(elem_classes="chatbot-container"):
                 chatbot = gr.Chatbot(
                     height=500,
-                    placeholder="Chat with your medical documents here... Type your question below.",
+                    placeholder="Chat with MedSwin... Type your question below.",
                     show_label=False,
                     type="messages"
                 )
@@ -1710,7 +1710,7 @@ def create_demo():
                         choices=list(MEDSWIN_MODELS.keys()),
                         value=DEFAULT_MEDICAL_MODEL,
                         label="Medical Model",
-                        info="MedSwin SFT (default), others download on first use"
+                        info="MedSwin TA (default), others download on first use"
                     )
                     
                     system_prompt = gr.Textbox(
@@ -1825,7 +1825,7 @@ if __name__ == "__main__":
     except Exception as e:
         logger.error(f"Translation model preloading failed: {e}")
         logger.warning("Translation features may be limited")
-    logger.info("Initializing default medical model (MedSwin SFT)...")
+    logger.info("Initializing default medical model (MedSwin TA)...")
     initialize_medical_model(DEFAULT_MEDICAL_MODEL)
     logger.info("Preloading Whisper model...")
     try:
