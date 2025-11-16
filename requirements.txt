@@ -21,6 +21,9 @@ openai-whisper
 soundfile
 numpy<2.0.0
 setuptools>=65.0.0
-# TTS installation - if pyworld fails, TTS will work without it for most models
-# For maya1 model, try: pip install TTS --no-deps && pip install coqui-tts
-TTS
+# TTS installation (OPTIONAL) - TTS features work without it
+# If you want TTS functionality, install manually due to pyworld build issues:
+# Option 1: pip install TTS --no-deps && pip install coqui-tts
+# Option 2: pip install TTS (may fail on pyworld, but TTS will work for most models without it)
+# The app will run without TTS - voice generation will be disabled
+# TTS

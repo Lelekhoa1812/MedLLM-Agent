@@ -37,7 +37,12 @@ from duckduckgo_search import DDGS
 import requests
 from bs4 import BeautifulSoup
 import whisper
-from TTS.api import TTS
+try:
+    from TTS.api import TTS
+    TTS_AVAILABLE = True
+except ImportError:
+    TTS_AVAILABLE = False
+    TTS = None
 import numpy as np
 import soundfile as sf
 import tempfile
@@ -222,6 +227,9 @@ def initialize_whisper_model():
 def initialize_tts_model():
     """Initialize TTS model for text-to-speech"""
     global global_tts_model
+    if not TTS_AVAILABLE:
+        logger.warning("TTS library not installed. TTS features will be disabled.")
+        return None
     if global_tts_model is None:
         try:
             logger.info("Initializing TTS model for voice generation...")
@@ -229,7 +237,7 @@ def initialize_tts_model():
             logger.info("TTS model initialized successfully")
         except Exception as e:
             logger.warning(f"TTS model initialization failed: {e}")
-            logger.warning("TTS features will be disabled. If pyworld dependency is missing, try: pip install pyworld")
+            logger.warning("TTS features will be disabled. If pyworld dependency is missing, try: pip install TTS --no-deps && pip install coqui-tts")
             global_tts_model = None
     return global_tts_model
 
@@ -267,6 +275,9 @@ def transcribe_audio(audio):
 
 def generate_speech(text: str):
     """Generate speech from text using TTS model"""
+    if not TTS_AVAILABLE:
+        logger.error("TTS library not installed. Please install TTS to use voice generation.")
+        return None
     global global_tts_model
     if global_tts_model is None:
         initialize_tts_model()
