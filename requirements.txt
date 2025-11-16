@@ -17,3 +17,6 @@ beautifulsoup4
 duckduckgo-search
 gradio
 spaces
+openai-whisper
+TTS
+soundfile

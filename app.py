@@ -36,6 +36,11 @@ from langdetect import detect, LangDetectException
 from duckduckgo_search import DDGS
 import requests
 from bs4 import BeautifulSoup
+import whisper
+from TTS.api import TTS
+import numpy as np
+import soundfile as sf
+import tempfile
 
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 logging.basicConfig(level=logging.INFO)
@@ -51,6 +56,8 @@ MEDSWIN_MODELS = {
 }
 DEFAULT_MEDICAL_MODEL = "MedSwin SFT"
 EMBEDDING_MODEL = "abhinand/MedEmbed-large-v0.1"  # Domain-tuned medical embedding model
+WHISPER_MODEL = "openai/whisper-large-v3-turbo"
+TTS_MODEL = "maya-research/maya1"
 HF_TOKEN = os.environ.get("HF_TOKEN")
 if not HF_TOKEN:
     raise ValueError("HF_TOKEN not found in environment variables")
@@ -161,6 +168,8 @@ global_translation_tokenizer = None
 global_medical_models = {}
 global_medical_tokenizers = {}
 global_file_info = {}
+global_whisper_model = None
+global_tts_model = None
 
 def initialize_translation_model():
     """Initialize DeepSeek-R1 model for translation purposes"""
@@ -195,6 +204,82 @@ def initialize_medical_model(model_name: str):
         global_medical_tokenizers[model_name] = tokenizer
         logger.info(f"Medical model {model_name} initialized successfully")
     return global_medical_models[model_name], global_medical_tokenizers[model_name]
+
+def initialize_whisper_model():
+    """Initialize Whisper model for speech-to-text"""
+    global global_whisper_model
+    if global_whisper_model is None:
+        logger.info("Initializing Whisper model for speech transcription...")
+        try:
+            # Try loading from HuggingFace
+            global_whisper_model = whisper.load_model("large-v3-turbo")
+        except:
+            # Fallback to base model
+            global_whisper_model = whisper.load_model("base")
+        logger.info("Whisper model initialized successfully")
+    return global_whisper_model
+
+def initialize_tts_model():
+    """Initialize TTS model for text-to-speech"""
+    global global_tts_model
+    if global_tts_model is None:
+        logger.info("Initializing TTS model for voice generation...")
+        global_tts_model = TTS(model_name=TTS_MODEL, progress_bar=False)
+        logger.info("TTS model initialized successfully")
+    return global_tts_model
+
+def transcribe_audio(audio):
+    """Transcribe audio to text using Whisper"""
+    global global_whisper_model
+    if global_whisper_model is None:
+        initialize_whisper_model()
+    
+    if audio is None:
+        return ""
+    
+    try:
+        # Handle file path (Gradio Audio component returns file path)
+        if isinstance(audio, str):
+            audio_path = audio
+        elif isinstance(audio, tuple):
+            # Handle tuple format (sample_rate, audio_data)
+            sample_rate, audio_data = audio
+            # Save to temp file
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as tmp_file:
+                sf.write(tmp_file.name, audio_data, samplerate=sample_rate)
+                audio_path = tmp_file.name
+        else:
+            audio_path = audio
+        
+        # Transcribe
+        result = global_whisper_model.transcribe(audio_path, language="en")
+        transcribed_text = result["text"].strip()
+        logger.info(f"Transcribed: {transcribed_text}")
+        return transcribed_text
+    except Exception as e:
+        logger.error(f"Transcription error: {e}")
+        return ""
+
+def generate_speech(text: str):
+    """Generate speech from text using TTS model"""
+    global global_tts_model
+    if global_tts_model is None:
+        initialize_tts_model()
+    
+    if not text or len(text.strip()) == 0:
+        return None
+    
+    try:
+        # Generate audio
+        wav = global_tts_model.tts(text)
+        
+        # Save to temporary file
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as tmp_file:
+            sf.write(tmp_file.name, wav, samplerate=22050)
+            return tmp_file.name
+    except Exception as e:
+        logger.error(f"TTS error: {e}")
+        return None
 
 def detect_language(text: str) -> str:
     """Detect language of input text"""
@@ -964,15 +1049,26 @@ def stream_chat(
         if needs_translation and partial_response:
             logger.info(f"Translating response back to {original_lang}...")
             translated_response = translate_text(partial_response, target_lang=original_lang, source_lang="en")
-            updated_history[-1]["content"] = translated_response
-            yield updated_history
-        else:
-            yield updated_history
+            partial_response = translated_response
+        
+        # Add speaker icon to assistant message
+        speaker_icon = ' 🔊'
+        partial_response_with_speaker = partial_response + speaker_icon
+        updated_history[-1]["content"] = partial_response_with_speaker
+        
+        yield updated_history
             
     except GeneratorExit:
         stop_event.set()
         thread.join()
         raise
+
+def generate_speech_for_message(text: str):
+    """Generate speech for a message and return audio file"""
+    audio_path = generate_speech(text)
+    if audio_path:
+        return audio_path
+    return None
 
 def create_demo():
     with gr.Blocks(css=CSS, theme=gr.themes.Soft()) as demo:
@@ -1011,14 +1107,74 @@ def create_demo():
                     type="messages"
                 )
                 with gr.Row(elem_classes="input-row"):
+                    with gr.Column(scale=1, min_width=50):
+                        mic_button = gr.Audio(
+                            sources=["microphone"],
+                            type="filepath",
+                            label="",
+                            show_label=False,
+                            container=False
+                        )
                     message_input = gr.Textbox(
                         placeholder="Type your medical question here...",
                         show_label=False,
                         container=False,
                         lines=1,
-                        scale=8
+                        scale=7
                     )
                     submit_button = gr.Button("➤", elem_classes="submit-btn", scale=1)
+                
+                # Handle microphone transcription
+                def handle_transcription(audio):
+                    if audio is None:
+                        return ""
+                    transcribed = transcribe_audio(audio)
+                    return transcribed
+                
+                mic_button.stop_recording(
+                    fn=handle_transcription,
+                    inputs=[mic_button],
+                    outputs=[message_input]
+                )
+                
+                # TTS component for generating speech from messages
+                with gr.Row(visible=False) as tts_row:
+                    tts_text = gr.Textbox(visible=False)
+                    tts_audio = gr.Audio(label="Generated Speech", visible=False)
+                
+                # Function to generate speech when speaker icon is clicked
+                def generate_speech_from_chat(history):
+                    """Extract last assistant message and generate speech"""
+                    if not history or len(history) == 0:
+                        return None
+                    last_msg = history[-1]
+                    if last_msg.get("role") == "assistant":
+                        text = last_msg.get("content", "").replace(" 🔊", "").strip()
+                        if text:
+                            audio_path = generate_speech(text)
+                            return audio_path
+                    return None
+                
+                # Add TTS button that appears when assistant responds
+                tts_button = gr.Button("🔊 Play Response", visible=False, size="sm")
+                
+                # Update TTS button visibility and generate speech
+                def update_tts_button(history):
+                    if history and len(history) > 0 and history[-1].get("role") == "assistant":
+                        return gr.update(visible=True)
+                    return gr.update(visible=False)
+                
+                chatbot.change(
+                    fn=update_tts_button,
+                    inputs=[chatbot],
+                    outputs=[tts_button]
+                )
+                
+                tts_button.click(
+                    fn=generate_speech_from_chat,
+                    inputs=[chatbot],
+                    outputs=[tts_audio]
+                )
                 
                 with gr.Accordion("⚙️ Advanced Settings", open=False):
                     with gr.Row():
@@ -1143,8 +1299,14 @@ def create_demo():
     return demo
 
 if __name__ == "__main__":
-    # Initialize default medical model
+    # Preload models on startup
+    logger.info("Preloading models on startup...")
     logger.info("Initializing default medical model (MedSwin SFT)...")
     initialize_medical_model(DEFAULT_MEDICAL_MODEL)
+    logger.info("Preloading Whisper model...")
+    initialize_whisper_model()
+    logger.info("Preloading TTS model...")
+    initialize_tts_model()
+    logger.info("All models preloaded successfully!")
     demo = create_demo()
     demo.launch()
