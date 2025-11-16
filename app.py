@@ -238,11 +238,49 @@ def initialize_whisper_model():
     if global_whisper_model is None:
         logger.info("Initializing Whisper model for speech transcription...")
         try:
-            # Try loading from HuggingFace
-            global_whisper_model = whisper.load_model("large-v3-turbo")
-        except:
-            # Fallback to base model
-            global_whisper_model = whisper.load_model("base")
+            # Check if we're in a spaces environment (has spaces patching)
+            in_spaces_env = hasattr(torch, '_spaces_patched') or 'spaces' in str(type(torch.Tensor.to))
+            
+            # Try loading from HuggingFace with device handling for spaces compatibility
+            try:
+                if in_spaces_env:
+                    # In spaces environment, load on CPU and don't move to device
+                    logger.info("Detected spaces environment, loading Whisper on CPU")
+                    global_whisper_model = whisper.load_model("large-v3-turbo", device="cpu")
+                    # Don't move to GPU in spaces environment
+                else:
+                    # Normal environment, let whisper handle device
+                    global_whisper_model = whisper.load_model("large-v3-turbo")
+            except NotImplementedError as e:
+                # Handle sparse tensor error from spaces library
+                if "SparseTensorImpl" in str(e) or "storage" in str(e).lower():
+                    logger.warning(f"Spaces library compatibility issue: {e}")
+                    logger.info("Trying to load Whisper model with workaround...")
+                    try:
+                        # Try loading on CPU explicitly
+                        global_whisper_model = whisper.load_model("base", device="cpu")
+                    except Exception as e2:
+                        logger.error(f"Failed to load Whisper with workaround: {e2}")
+                        global_whisper_model = None
+                        return None
+                else:
+                    raise
+            except Exception as e1:
+                logger.warning(f"Failed to load large-v3-turbo: {e1}")
+                try:
+                    # Fallback to base model with CPU
+                    global_whisper_model = whisper.load_model("base", device="cpu")
+                except Exception as e2:
+                    logger.error(f"Failed to load Whisper base model: {e2}")
+                    # Set to None to indicate failure - will use MCP or skip transcription
+                    global_whisper_model = None
+                    return None
+        except Exception as e:
+            logger.error(f"Whisper model initialization error: {e}")
+            import traceback
+            logger.debug(traceback.format_exc())
+            global_whisper_model = None
+            return None
         logger.info("Whisper model initialized successfully")
     return global_whisper_model
 
@@ -263,11 +301,46 @@ def initialize_tts_model():
             global_tts_model = None
     return global_tts_model
 
+async def transcribe_audio_mcp(audio_path: str) -> str:
+    """Transcribe audio using MCP Whisper tool"""
+    global global_mcp_client
+    
+    if not MCP_AVAILABLE:
+        return ""
+    
+    try:
+        # Initialize MCP client if needed
+        if global_mcp_client is None:
+            return ""
+        
+        # Find Whisper tool
+        tools = await global_mcp_client.list_tools()
+        whisper_tool = None
+        for tool in tools.tools:
+            if "whisper" in tool.name.lower() or "transcribe" in tool.name.lower() or "speech" in tool.name.lower():
+                whisper_tool = tool
+                logger.info(f"Found MCP Whisper tool: {tool.name}")
+                break
+        
+        if whisper_tool:
+            result = await global_mcp_client.call_tool(
+                whisper_tool.name,
+                arguments={"audio_path": audio_path, "language": "en"}
+            )
+            
+            # Parse result
+            if hasattr(result, 'content') and result.content:
+                for item in result.content:
+                    if hasattr(item, 'text'):
+                        return item.text.strip()
+        return ""
+    except Exception as e:
+        logger.debug(f"MCP transcription error: {e}")
+        return ""
+
 def transcribe_audio(audio):
-    """Transcribe audio to text using Whisper"""
+    """Transcribe audio to text using Whisper (with MCP fallback)"""
     global global_whisper_model
-    if global_whisper_model is None:
-        initialize_whisper_model()
     
     if audio is None:
         return ""
@@ -286,6 +359,35 @@ def transcribe_audio(audio):
         else:
             audio_path = audio
         
+        # Try MCP first if available
+        if MCP_AVAILABLE:
+            try:
+                loop = asyncio.get_event_loop()
+                if loop.is_running():
+                    try:
+                        import nest_asyncio
+                        transcribed = nest_asyncio.run(transcribe_audio_mcp(audio_path))
+                        if transcribed:
+                            logger.info(f"Transcribed via MCP: {transcribed}")
+                            return transcribed
+                    except:
+                        pass
+                else:
+                    transcribed = loop.run_until_complete(transcribe_audio_mcp(audio_path))
+                    if transcribed:
+                        logger.info(f"Transcribed via MCP: {transcribed}")
+                        return transcribed
+            except Exception as e:
+                logger.debug(f"MCP transcription not available: {e}")
+        
+        # Fallback to local Whisper model
+        if global_whisper_model is None:
+            initialize_whisper_model()
+        
+        if global_whisper_model is None:
+            logger.warning("Whisper model not available and MCP not working")
+            return ""
+        
         # Transcribe
         result = global_whisper_model.transcribe(audio_path, language="en")
         transcribed_text = result["text"].strip()
@@ -295,20 +397,87 @@ def transcribe_audio(audio):
         logger.error(f"Transcription error: {e}")
         return ""
 
+async def generate_speech_mcp(text: str) -> str:
+    """Generate speech using MCP TTS tool"""
+    global global_mcp_client
+    
+    if not MCP_AVAILABLE:
+        return None
+    
+    try:
+        # Initialize MCP client if needed
+        if global_mcp_client is None:
+            return None
+        
+        # Find TTS tool
+        tools = await global_mcp_client.list_tools()
+        tts_tool = None
+        for tool in tools.tools:
+            if "tts" in tool.name.lower() or "speech" in tool.name.lower() or "synthesize" in tool.name.lower():
+                tts_tool = tool
+                logger.info(f"Found MCP TTS tool: {tool.name}")
+                break
+        
+        if tts_tool:
+            result = await global_mcp_client.call_tool(
+                tts_tool.name,
+                arguments={"text": text, "language": "en"}
+            )
+            
+            # Parse result - MCP might return audio data or file path
+            if hasattr(result, 'content') and result.content:
+                for item in result.content:
+                    if hasattr(item, 'text'):
+                        # If it's a file path
+                        if os.path.exists(item.text):
+                            return item.text
+                    elif hasattr(item, 'data') and item.data:
+                        # If it's binary audio data, save it
+                        with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as tmp_file:
+                            tmp_file.write(item.data)
+                            return tmp_file.name
+        return None
+    except Exception as e:
+        logger.debug(f"MCP TTS error: {e}")
+        return None
+
 def generate_speech(text: str):
-    """Generate speech from text using TTS model"""
+    """Generate speech from text using TTS model (with MCP fallback)"""
+    if not text or len(text.strip()) == 0:
+        return None
+    
+    # Try MCP first if available
+    if MCP_AVAILABLE:
+        try:
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                try:
+                    import nest_asyncio
+                    audio_path = nest_asyncio.run(generate_speech_mcp(text))
+                    if audio_path:
+                        logger.info("Generated speech via MCP")
+                        return audio_path
+                except:
+                    pass
+            else:
+                audio_path = loop.run_until_complete(generate_speech_mcp(text))
+                if audio_path:
+                    logger.info("Generated speech via MCP")
+                    return audio_path
+        except Exception as e:
+            logger.debug(f"MCP TTS not available: {e}")
+    
+    # Fallback to local TTS model
     if not TTS_AVAILABLE:
         logger.error("TTS library not installed. Please install TTS to use voice generation.")
         return None
+    
     global global_tts_model
     if global_tts_model is None:
         initialize_tts_model()
     
     if global_tts_model is None:
         logger.error("TTS model not available. Please check dependencies.")
-        return None
-    
-    if not text or len(text.strip()) == 0:
         return None
     
     try:
@@ -360,8 +529,71 @@ def detect_language(text: str) -> str:
     except LangDetectException:
         return "en"  # Default to English if detection fails
 
+async def translate_text_mcp(text: str, target_lang: str = "en", source_lang: str = None) -> str:
+    """Translate text using MCP translation tool"""
+    global global_mcp_client
+    
+    if not MCP_AVAILABLE:
+        return ""
+    
+    try:
+        # Initialize MCP client if needed
+        if global_mcp_client is None:
+            return ""
+        
+        # Find translation tool
+        tools = await global_mcp_client.list_tools()
+        translate_tool = None
+        for tool in tools.tools:
+            if "translate" in tool.name.lower() or "translation" in tool.name.lower():
+                translate_tool = tool
+                logger.info(f"Found MCP translation tool: {tool.name}")
+                break
+        
+        if translate_tool:
+            args = {"text": text, "target_language": target_lang}
+            if source_lang:
+                args["source_language"] = source_lang
+            
+            result = await global_mcp_client.call_tool(
+                translate_tool.name,
+                arguments=args
+            )
+            
+            # Parse result
+            if hasattr(result, 'content') and result.content:
+                for item in result.content:
+                    if hasattr(item, 'text'):
+                        return item.text.strip()
+        return ""
+    except Exception as e:
+        logger.debug(f"MCP translation error: {e}")
+        return ""
+
 def translate_text(text: str, target_lang: str = "en", source_lang: str = None) -> str:
-    """Translate text using DeepSeek-R1 model"""
+    """Translate text using DeepSeek-R1 model (with MCP fallback)"""
+    # Try MCP first if available
+    if MCP_AVAILABLE:
+        try:
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                try:
+                    import nest_asyncio
+                    translated = nest_asyncio.run(translate_text_mcp(text, target_lang, source_lang))
+                    if translated:
+                        logger.info(f"Translated via MCP: {translated[:50]}...")
+                        return translated
+                except:
+                    pass
+            else:
+                translated = loop.run_until_complete(translate_text_mcp(text, target_lang, source_lang))
+                if translated:
+                    logger.info(f"Translated via MCP: {translated[:50]}...")
+                    return translated
+        except Exception as e:
+            logger.debug(f"MCP translation not available: {e}")
+    
+    # Fallback to local translation model
     global global_translation_model, global_translation_tokenizer
     if global_translation_model is None or global_translation_tokenizer is None:
         initialize_translation_model()
@@ -1550,17 +1782,26 @@ if __name__ == "__main__":
     logger.info("Initializing default medical model (MedSwin SFT)...")
     initialize_medical_model(DEFAULT_MEDICAL_MODEL)
     logger.info("Preloading Whisper model...")
-    initialize_whisper_model()
+    try:
+        initialize_whisper_model()
+        if global_whisper_model is not None:
+            logger.info("Whisper model preloaded successfully!")
+        else:
+            logger.warning("Whisper model not available - will use MCP or disable transcription")
+    except Exception as e:
+        logger.warning(f"Whisper model preloading failed: {e}")
+        logger.warning("Speech-to-text will use MCP or be disabled")
+        global_whisper_model = None
     logger.info("Preloading TTS model...")
     try:
         initialize_tts_model()
         if global_tts_model is not None:
             logger.info("TTS model preloaded successfully!")
         else:
-            logger.warning("TTS model not available - voice generation will be disabled")
+            logger.warning("TTS model not available - will use MCP or disable voice generation")
     except Exception as e:
         logger.warning(f"TTS model preloading failed: {e}")
-        logger.warning("Voice generation features will be disabled")
+        logger.warning("Text-to-speech will use MCP or be disabled")
     logger.info("Model preloading complete!")
     demo = create_demo()
     demo.launch()

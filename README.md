@@ -86,6 +86,9 @@ tags:
 - **Embedding Model**: abhinand/MedEmbed-large-v0.1 (domain-tuned medical embeddings)
 - **RAG Framework**: LlamaIndex with hierarchical node parsing
 - **Web Search**: Model Context Protocol (MCP) tools with automatic fallback to DuckDuckGo
+- **Speech-to-Text**: MCP Whisper integration with local Whisper fallback
+- **Text-to-Speech**: MCP TTS integration with local TTS fallback
+- **Translation**: MCP translation tools with local DeepSeek-R1 fallback
 - **MCP Client**: Python MCP SDK for standardized tool integration
 
 ## 📋 Requirements
@@ -97,9 +100,27 @@ See `requirements.txt` for full dependency list. Key dependencies:
 - **RAG Framework**: `llama-index`
 - **Utilities**: `langdetect`, `gradio`, `spaces`
 
-### MCP Configuration (Optional)
+### 🔌 MCP Configuration
 
-The application uses MCP tools by default when available. To configure MCP servers:
+The application supports MCP (Model Context Protocol) tools for various services. Configure MCP servers via environment variables:
+
+```bash
+# Web Search MCP Server
+export MCP_SERVER_COMMAND="python"
+export MCP_SERVER_ARGS="-m duckduckgo_mcp_server"
+
+# Or use npx for Node.js MCP servers
+export MCP_SERVER_COMMAND="npx"
+export MCP_SERVER_ARGS="-y @modelcontextprotocol/server-duckduckgo"
+```
+
+**Available MCP Tools:**
+- **Web Search**: DuckDuckGo search via MCP (automatic fallback to direct API)
+- **Speech-to-Text**: Whisper transcription via MCP (automatic fallback to local Whisper)
+- **Text-to-Speech**: TTS generation via MCP (automatic fallback to local TTS)
+- **Translation**: Multi-language translation via MCP (automatic fallback to local DeepSeek-R1)
+
+The application automatically detects and uses MCP tools when available, falling back to local implementations seamlessly.
 
 1. **Install MCP Python SDK** (already in requirements.txt):
    ```bash
