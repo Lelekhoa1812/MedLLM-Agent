@@ -33,7 +33,7 @@ from llama_index.llms.huggingface import HuggingFaceLLM
 from llama_index.embeddings.huggingface import HuggingFaceEmbedding
 from tqdm import tqdm
 from langdetect import detect, LangDetectException
-from duckduckgo_search import DDGS
+from ddgs import DDGS
 import requests
 from bs4 import BeautifulSoup
 import whisper
