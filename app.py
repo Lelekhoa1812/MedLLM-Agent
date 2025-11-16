@@ -48,9 +48,9 @@ try:
 except ImportError:
     MCP_AVAILABLE = False
     # Fallback imports if MCP is not available
-    from ddgs import DDGS
-    import requests
-    from bs4 import BeautifulSoup
+from ddgs import DDGS
+import requests
+from bs4 import BeautifulSoup
 try:
     from TTS.api import TTS
     TTS_AVAILABLE = True
@@ -148,6 +148,12 @@ CSS = """
     display: flex;
     align-items: center;
 }
+.recording-timer {
+    font-size: 12px;
+    color: #666;
+    text-align: center;
+    margin-top: 5px;
+}
 .feature-badge {
     display: inline-block;
     padding: 3px 8px;
@@ -192,6 +198,7 @@ global_tts_model = None
 
 # MCP client storage
 global_mcp_client = None
+global_mcp_context = None  # Store the context manager
 # MCP server configuration via environment variables
 # Example: MCP_SERVER_COMMAND="python" MCP_SERVER_ARGS="-m duckduckgo_mcp_server"
 # Or: MCP_SERVER_COMMAND="npx" MCP_SERVER_ARGS="-y @modelcontextprotocol/server-duckduckgo"
@@ -630,7 +637,7 @@ def translate_text(text: str, target_lang: str = "en", source_lang: str = None) 
 
 async def search_web_mcp(query: str, max_results: int = 5) -> list:
     """Search web using MCP tools"""
-    global global_mcp_client
+    global global_mcp_client, global_mcp_context
     
     if not MCP_AVAILABLE:
         logger.warning("MCP not available, falling back to direct search")
@@ -653,6 +660,8 @@ async def search_web_mcp(query: str, max_results: int = 5) -> list:
             except Exception as e:
                 logger.error(f"Failed to initialize MCP client: {e}")
                 logger.info("Falling back to direct search. To use MCP, ensure MCP server is installed and configured.")
+                global_mcp_client = None
+                global_mcp_context = None
                 return search_web_fallback(query, max_results)
         
         # Call MCP search tool
@@ -759,11 +768,14 @@ async def search_web_mcp(query: str, max_results: int = 5) -> list:
 
 def search_web_fallback(query: str, max_results: int = 5) -> list:
     """Fallback web search using DuckDuckGo directly (when MCP is not available)"""
-    if not MCP_AVAILABLE:
-        # Use direct library calls as fallback
+    # Always import here to ensure availability
+    try:
         from ddgs import DDGS
         import requests
         from bs4 import BeautifulSoup
+    except ImportError:
+        logger.error("Fallback dependencies (ddgs, requests, beautifulsoup4) not available")
+        return []
     
     try:
         with DDGS() as ddgs:
@@ -1585,34 +1597,61 @@ def create_demo():
                     type="messages"
                 )
                 with gr.Row(elem_classes="input-row"):
-                    with gr.Column(scale=1, min_width=50):
-                        mic_button = gr.Audio(
-                            sources=["microphone"],
-                            type="filepath",
-                            label="",
-                            show_label=False,
-                            container=False
-                        )
                     message_input = gr.Textbox(
                         placeholder="Type your medical question here...",
                         show_label=False,
                         container=False,
                         lines=1,
-                        scale=7
+                        scale=10
+                    )
+                        mic_button = gr.Audio(
+                            sources=["microphone"],
+                            type="filepath",
+                            label="",
+                            show_label=False,
+                        container=False,
+                        scale=1
                     )
                     submit_button = gr.Button("➤", elem_classes="submit-btn", scale=1)
                 
+                # Timer display for recording (shown below input row)
+                recording_timer = gr.Textbox(
+                    value="",
+                    label="",
+                        show_label=False,
+                    interactive=False,
+                    visible=False,
+                        container=False,
+                    elem_classes="recording-timer"
+                    )
+                
                 # Handle microphone transcription
-                def handle_transcription(audio):
+                import time
+                recording_start_time = [None]
+                
+                def handle_recording_start():
+                    """Called when recording starts"""
+                    recording_start_time[0] = time.time()
+                    return gr.update(visible=True, value="Recording... 0s")
+                
+                def handle_recording_stop(audio):
+                    """Called when recording stops"""
+                    recording_start_time[0] = None
                     if audio is None:
-                        return ""
+                        return gr.update(visible=False, value=""), ""
                     transcribed = transcribe_audio(audio)
-                    return transcribed
+                    return gr.update(visible=False, value=""), transcribed
+                
+                # Use JavaScript for timer updates (simpler than Gradio Timer)
+                mic_button.start_recording(
+                    fn=handle_recording_start,
+                    outputs=[recording_timer]
+                )
                 
                 mic_button.stop_recording(
-                    fn=handle_transcription,
+                    fn=handle_recording_stop,
                     inputs=[mic_button],
-                    outputs=[message_input]
+                    outputs=[recording_timer, message_input]
                 )
                 
                 # TTS component for generating speech from messages
@@ -1779,11 +1818,18 @@ def create_demo():
 if __name__ == "__main__":
     # Preload models on startup
     logger.info("Preloading models on startup...")
+    logger.info("Initializing translation model (DeepSeek-R1)...")
+    try:
+        initialize_translation_model()
+        logger.info("Translation model (DeepSeek-R1) preloaded successfully!")
+    except Exception as e:
+        logger.error(f"Translation model preloading failed: {e}")
+        logger.warning("Translation features may be limited")
     logger.info("Initializing default medical model (MedSwin SFT)...")
     initialize_medical_model(DEFAULT_MEDICAL_MODEL)
     logger.info("Preloading Whisper model...")
     try:
-        initialize_whisper_model()
+    initialize_whisper_model()
         if global_whisper_model is not None:
             logger.info("Whisper model preloaded successfully!")
         else:
