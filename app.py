@@ -31,24 +31,38 @@ from llama_index.core.storage.docstore import SimpleDocumentStore
 from llama_index.llms.huggingface import HuggingFaceLLM
 from llama_index.embeddings.huggingface import HuggingFaceEmbedding
 from tqdm import tqdm
+from langdetect import detect, LangDetectException
+from duckduckgo_search import DDGS
+import requests
+from bs4 import BeautifulSoup
 
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 hf_logging.set_verbosity_error()
 
-MODEL = "meta-llama/Meta-Llama-3.1-8B-Instruct"
+# Model configurations
+TRANSLATION_MODEL = "meta-llama/Meta-Llama-3.1-8B-Instruct"
+MEDSWIN_MODELS = {
+    "MedSwin SFT": "MedSwin/MedSwin-7B-SFT",
+    "MedSwin KD": "MedSwin/MedSwin-7B-KD",
+    "MedSwin TA": "MedSwin/MedSwin-Merged-TA-SFT-0.7"
+}
+DEFAULT_MEDICAL_MODEL = "MedSwin SFT"
 EMBEDDING_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
 HF_TOKEN = os.environ.get("HF_TOKEN")
 if not HF_TOKEN:
     raise ValueError("HF_TOKEN not found in environment variables")
 
 # Custom UI
-TITLE = "<h1><center>Multi-Document RAG with LLama 3.1-8B Model</center></h1>"
+TITLE = "<h1><center>🩺 MedLLM Agent - Medical RAG & Web Search System</center></h1>"
 DESCRIPTION = """
 <center>
+<p><strong>Advanced Medical AI Assistant</strong> powered by MedSwin models</p>
+<p>📄 <strong>Document RAG:</strong> Answer based on uploaded medical documents</p>
+<p>🌐 <strong>Web Search:</strong> Fetch knowledge from reliable online medical resources</p>
+<p>🌍 <strong>Multi-language:</strong> Automatic translation for non-English queries</p>
 <p>Upload PDF or text files to get started!</p>
-<p>After asking question wait for RAG system to get relevant nodes and pass to LLM</p>
 </center>
 """
 CSS = """
@@ -107,6 +121,22 @@ CSS = """
     display: flex;
     align-items: center;
 }
+.feature-badge {
+    display: inline-block;
+    padding: 3px 8px;
+    margin: 2px;
+    border-radius: 12px;
+    font-size: 11px;
+    font-weight: bold;
+}
+.badge-rag {
+    background: #e3f2fd;
+    color: #1976d2;
+}
+.badge-web {
+    background: #f3e5f5;
+    color: #7b1fa2;
+}
 @media (min-width: 768px) {
     .main-container {
         display: flex;
@@ -124,34 +154,195 @@ CSS = """
 }
 """
 
-global_model = None
-global_tokenizer = None
+# Global model storage
+global_translation_model = None
+global_translation_tokenizer = None
+global_medical_models = {}
+global_medical_tokenizers = {}
 global_file_info = {}
 
-def initialize_model_and_tokenizer():
-    global global_model, global_tokenizer
-    if global_model is None or global_tokenizer is None:
-        logger.info("Initializing model and tokenizer...")
-        global_tokenizer = AutoTokenizer.from_pretrained(MODEL, token=HF_TOKEN)
-        global_model = AutoModelForCausalLM.from_pretrained(
-            MODEL,
+def initialize_translation_model():
+    """Initialize Llama model for translation purposes"""
+    global global_translation_model, global_translation_tokenizer
+    if global_translation_model is None or global_translation_tokenizer is None:
+        logger.info("Initializing translation model (Llama-8B)...")
+        global_translation_tokenizer = AutoTokenizer.from_pretrained(TRANSLATION_MODEL, token=HF_TOKEN)
+        global_translation_model = AutoModelForCausalLM.from_pretrained(
+            TRANSLATION_MODEL,
             device_map="auto",
             trust_remote_code=True,
             token=HF_TOKEN,
             torch_dtype=torch.float16
         )
-        logger.info("Model and tokenizer initialized successfully")
+        logger.info("Translation model initialized successfully")
 
-def get_llm(temperature=0.7, max_new_tokens=256, top_p=0.95, top_k=50):
-    global global_model, global_tokenizer
-    if global_model is None or global_tokenizer is None:
-        initialize_model_and_tokenizer()
+def initialize_medical_model(model_name: str):
+    """Initialize medical model (MedSwin) - download on demand"""
+    global global_medical_models, global_medical_tokenizers
+    if model_name not in global_medical_models or global_medical_models[model_name] is None:
+        logger.info(f"Initializing medical model: {model_name}...")
+        model_path = MEDSWIN_MODELS[model_name]
+        tokenizer = AutoTokenizer.from_pretrained(model_path, token=HF_TOKEN)
+        model = AutoModelForCausalLM.from_pretrained(
+            model_path,
+            device_map="auto",
+            trust_remote_code=True,
+            token=HF_TOKEN,
+            torch_dtype=torch.float16
+        )
+        global_medical_models[model_name] = model
+        global_medical_tokenizers[model_name] = tokenizer
+        logger.info(f"Medical model {model_name} initialized successfully")
+    return global_medical_models[model_name], global_medical_tokenizers[model_name]
+
+def detect_language(text: str) -> str:
+    """Detect language of input text"""
+    try:
+        lang = detect(text)
+        return lang
+    except LangDetectException:
+        return "en"  # Default to English if detection fails
+
+def translate_text(text: str, target_lang: str = "en", source_lang: str = None) -> str:
+    """Translate text using Llama model"""
+    global global_translation_model, global_translation_tokenizer
+    if global_translation_model is None or global_translation_tokenizer is None:
+        initialize_translation_model()
+    
+    if source_lang:
+        prompt = f"Translate the following {source_lang} text to {target_lang}. Only provide the translation, no explanations:\n\n{text}"
+    else:
+        prompt = f"Translate the following text to {target_lang}. Only provide the translation, no explanations:\n\n{text}"
+    
+    messages = [
+        {"role": "system", "content": "You are a professional translator. Translate accurately and concisely."},
+        {"role": "user", "content": prompt}
+    ]
+    
+    prompt_text = global_translation_tokenizer.apply_chat_template(
+        messages,
+        tokenize=False,
+        add_generation_prompt=True
+    )
+    
+    inputs = global_translation_tokenizer(prompt_text, return_tensors="pt").to(global_translation_model.device)
+    
+    with torch.no_grad():
+        outputs = global_translation_model.generate(
+            **inputs,
+            max_new_tokens=512,
+            temperature=0.3,
+            do_sample=True,
+            pad_token_id=global_translation_tokenizer.eos_token_id
+        )
+    
+    response = global_translation_tokenizer.decode(outputs[0][inputs['input_ids'].shape[1]:], skip_special_tokens=True)
+    return response.strip()
+
+def search_web(query: str, max_results: int = 5) -> list:
+    """Search web using DuckDuckGo and extract content"""
+    try:
+        with DDGS() as ddgs:
+            results = list(ddgs.text(query, max_results=max_results))
+            web_content = []
+            for result in results:
+                try:
+                    url = result.get('href', '')
+                    title = result.get('title', '')
+                    snippet = result.get('body', '')
+                    
+                    # Try to fetch full content
+                    try:
+                        response = requests.get(url, timeout=5, headers={'User-Agent': 'Mozilla/5.0'})
+                        if response.status_code == 200:
+                            soup = BeautifulSoup(response.content, 'html.parser')
+                            # Extract main content
+                            for script in soup(["script", "style"]):
+                                script.decompose()
+                            text = soup.get_text()
+                            # Clean and limit text
+                            lines = (line.strip() for line in text.splitlines())
+                            chunks = (phrase.strip() for line in lines for phrase in line.split("  "))
+                            text = ' '.join(chunk for chunk in chunks if chunk)
+                            if len(text) > 1000:
+                                text = text[:1000] + "..."
+                            web_content.append({
+                                'title': title,
+                                'url': url,
+                                'content': snippet + "\n" + text[:500] if text else snippet
+                            })
+                        else:
+                            web_content.append({
+                                'title': title,
+                                'url': url,
+                                'content': snippet
+                            })
+                    except:
+                        web_content.append({
+                            'title': title,
+                            'url': url,
+                            'content': snippet
+                        })
+                except Exception as e:
+                    logger.error(f"Error processing search result: {e}")
+                    continue
+            return web_content
+    except Exception as e:
+        logger.error(f"Web search error: {e}")
+        return []
+
+def summarize_web_content(content_list: list, query: str) -> str:
+    """Summarize web search results using Llama model"""
+    global global_translation_model, global_translation_tokenizer
+    if global_translation_model is None or global_translation_tokenizer is None:
+        initialize_translation_model()
+    
+    combined_content = "\n\n".join([f"Source: {item['title']}\n{item['content']}" for item in content_list[:3]])
+    
+    prompt = f"""Summarize the following web search results related to the query: "{query}"
+
+Extract key medical information, facts, and insights. Be concise and focus on reliable information.
+
+Search Results:
+{combined_content}
+
+Summary:"""
+    
+    messages = [
+        {"role": "system", "content": "You are a medical information summarizer. Extract and summarize key medical facts accurately."},
+        {"role": "user", "content": prompt}
+    ]
+    
+    prompt_text = global_translation_tokenizer.apply_chat_template(
+        messages,
+        tokenize=False,
+        add_generation_prompt=True
+    )
+    
+    inputs = global_translation_tokenizer(prompt_text, return_tensors="pt").to(global_translation_model.device)
+    
+    with torch.no_grad():
+        outputs = global_translation_model.generate(
+            **inputs,
+            max_new_tokens=512,
+            temperature=0.5,
+            do_sample=True,
+            pad_token_id=global_translation_tokenizer.eos_token_id
+        )
+    
+    summary = global_translation_tokenizer.decode(outputs[0][inputs['input_ids'].shape[1]:], skip_special_tokens=True)
+    return summary.strip()
+
+def get_llm_for_rag(temperature=0.7, max_new_tokens=256, top_p=0.95, top_k=50):
+    """Get LLM for RAG indexing (uses translation model)"""
+    if global_translation_model is None or global_translation_tokenizer is None:
+        initialize_translation_model()
     
     return HuggingFaceLLM(
         context_window=4096,
         max_new_tokens=max_new_tokens,
-        tokenizer=global_tokenizer,
-        model=global_model,
+        tokenizer=global_translation_tokenizer,
+        model=global_translation_model,
         generate_kwargs={
             "do_sample": True,
             "temperature": temperature,
@@ -174,7 +365,7 @@ def extract_text_from_document(file):
     else:
         return None, 0, ValueError(f"Unsupported file format: {file_extension}")
 
-@spaces.GPU()
+@spaces.GPU(max_duration=120)
 def create_or_update_index(files, request: gr.Request):
     global global_file_info
     
@@ -185,7 +376,7 @@ def create_or_update_index(files, request: gr.Request):
     user_id = request.session_hash
     save_dir = f"./{user_id}_index"
     # Initialize LlamaIndex modules
-    llm = get_llm()
+    llm = get_llm_for_rag()
     embed_model = HuggingFaceEmbedding(model_name=EMBEDDING_MODEL, token=HF_TOKEN)
     Settings.llm = llm
     Settings.embed_model = embed_model
@@ -234,13 +425,6 @@ def create_or_update_index(files, request: gr.Request):
     new_leaf_nodes = get_leaf_nodes(new_nodes)
     new_root_nodes = get_root_nodes(new_nodes)
     logger.info(f"Generated {len(new_nodes)} total nodes ({len(new_root_nodes)} root, {len(new_leaf_nodes)} leaf)")
-    node_ancestry = {}
-    for node in new_nodes:
-        if hasattr(node, 'metadata') and 'file_name' in node.metadata:
-            file_origin = node.metadata['file_name']
-            if file_origin not in node_ancestry:
-                node_ancestry[file_origin] = 0
-            node_ancestry[file_origin] += 1
     
     if os.path.exists(save_dir):
         logger.info(f"Loading existing index from {save_dir}")
@@ -288,7 +472,7 @@ def create_or_update_index(files, request: gr.Request):
     output_container += "</div>"
     return f"Successfully indexed {len(files)} files.", output_container
 
-@spaces.GPU()
+@spaces.GPU(max_duration=120)
 def stream_chat(
     message: str,
     history: list,
@@ -300,75 +484,125 @@ def stream_chat(
     penalty: float,
     retriever_k: int,
     merge_threshold: float,
+    use_rag: bool,
+    medical_model: str,
+    use_web_search: bool,
     request: gr.Request
 ):
     if not request:
         yield history + [{"role": "assistant", "content": "Session initialization failed. Please refresh the page."}]
         return
+    
+    # Detect language and translate if needed
+    original_lang = detect_language(message)
+    original_message = message
+    needs_translation = original_lang != "en"
+    
+    if needs_translation:
+        logger.info(f"Detected non-English language: {original_lang}, translating to English...")
+        message = translate_text(message, target_lang="en", source_lang=original_lang)
+        logger.info(f"Translated query: {message}")
+    
     user_id = request.session_hash
     index_dir = f"./{user_id}_index"
-    if not os.path.exists(index_dir):
-        yield history + [{"role": "assistant", "content": "Please upload documents first."}]
-        return
-
-    max_new_tokens = int(max_new_tokens) if isinstance(max_new_tokens, (int, float)) else 1024
-    temperature = float(temperature) if isinstance(temperature, (int, float)) else 0.9  
-    top_p = float(top_p) if isinstance(top_p, (int, float)) else 0.95  
-    top_k = int(top_k) if isinstance(top_k, (int, float)) else 50  
-    penalty = float(penalty) if isinstance(penalty, (int, float)) else 1.2
-    retriever_k = int(retriever_k) if isinstance(retriever_k, (int, float)) else 15
-    merge_threshold = float(merge_threshold) if isinstance(merge_threshold, (int, float)) else 0.5
-    llm = get_llm(temperature=temperature, max_new_tokens=max_new_tokens, top_p=top_p, top_k=top_k)
-    embed_model = HuggingFaceEmbedding(model_name=EMBEDDING_MODEL, token=HF_TOKEN)
-    Settings.llm = llm
-    Settings.embed_model = embed_model
-    storage_context = StorageContext.from_defaults(persist_dir=index_dir)
-    index = load_index_from_storage(storage_context, settings=Settings)
-    base_retriever = index.as_retriever(similarity_top_k=retriever_k)
-    auto_merging_retriever = AutoMergingRetriever(
-        base_retriever,
-        storage_context=storage_context,
-        simple_ratio_thresh=merge_threshold, 
-        verbose=True
-    )
-    logger.info(f"Query: {message}")
-    retrieval_start = time.time()
-    base_nodes = base_retriever.retrieve(message)
-    logger.info(f"Retrieved {len(base_nodes)} base nodes in {time.time() - retrieval_start:.2f}s")
-    base_file_sources = {}
-    for node in base_nodes:
-        if hasattr(node.node, 'metadata') and 'file_name' in node.node.metadata:
-            file_name = node.node.metadata['file_name']
-            if file_name not in base_file_sources:
-                base_file_sources[file_name] = 0
-            base_file_sources[file_name] += 1
-    logger.info(f"Base retrieval file distribution: {base_file_sources}")
-    merging_start = time.time()
-    merged_nodes = auto_merging_retriever.retrieve(message)
-    logger.info(f"Retrieved {len(merged_nodes)} merged nodes in {time.time() - merging_start:.2f}s")
-    merged_file_sources = {}
-    for node in merged_nodes:
-        if hasattr(node.node, 'metadata') and 'file_name' in node.node.metadata:
-            file_name = node.node.metadata['file_name']
-            if file_name not in merged_file_sources:
-                merged_file_sources[file_name] = 0
-            merged_file_sources[file_name] += 1
-    logger.info(f"Merged retrieval file distribution: {merged_file_sources}")
-    context = "\n\n".join([n.node.text for n in merged_nodes])
+    
+    # Initialize medical model
+    medical_model_obj, medical_tokenizer = initialize_medical_model(medical_model)
+    
+    # Adjust system prompt based on RAG setting
+    if use_rag:
+        if not os.path.exists(index_dir):
+            yield history + [{"role": "assistant", "content": "Please upload documents first to use RAG."}]
+            return
+        
+        base_system_prompt = system_prompt if system_prompt else "As a medical specialist, provide detailed and accurate answers based on the provided medical documents."
+    else:
+        base_system_prompt = "As a medical specialist, provide short and concise clinical answers. Be brief and avoid lengthy explanations. Focus on key medical facts only."
+    
+    # Get RAG context if enabled
+    rag_context = ""
     source_info = ""
-    if merged_file_sources:
-        source_info = "\n\nRetrieved information from files: " + ", ".join(merged_file_sources.keys())
-    formatted_system_prompt = f"{system_prompt}\n\nDocument Context:\n{context}{source_info}"
+    if use_rag and os.path.exists(index_dir):
+        embed_model = HuggingFaceEmbedding(model_name=EMBEDDING_MODEL, token=HF_TOKEN)
+        Settings.embed_model = embed_model
+        storage_context = StorageContext.from_defaults(persist_dir=index_dir)
+        index = load_index_from_storage(storage_context, settings=Settings)
+        base_retriever = index.as_retriever(similarity_top_k=retriever_k)
+        auto_merging_retriever = AutoMergingRetriever(
+            base_retriever,
+            storage_context=storage_context,
+            simple_ratio_thresh=merge_threshold, 
+            verbose=True
+        )
+        logger.info(f"Query: {message}")
+        retrieval_start = time.time()
+        merged_nodes = auto_merging_retriever.retrieve(message)
+        logger.info(f"Retrieved {len(merged_nodes)} merged nodes in {time.time() - retrieval_start:.2f}s")
+        merged_file_sources = {}
+        for node in merged_nodes:
+            if hasattr(node.node, 'metadata') and 'file_name' in node.node.metadata:
+                file_name = node.node.metadata['file_name']
+                if file_name not in merged_file_sources:
+                    merged_file_sources[file_name] = 0
+                merged_file_sources[file_name] += 1
+        logger.info(f"Merged retrieval file distribution: {merged_file_sources}")
+        rag_context = "\n\n".join([n.node.text for n in merged_nodes])
+        if merged_file_sources:
+            source_info = "\n\nRetrieved information from files: " + ", ".join(merged_file_sources.keys())
+    
+    # Get web search context if enabled
+    web_context = ""
+    web_sources = []
+    if use_web_search:
+        logger.info("Performing web search...")
+        web_results = search_web(message, max_results=5)
+        if web_results:
+            web_summary = summarize_web_content(web_results, message)
+            web_context = f"\n\nAdditional Web Sources:\n{web_summary}"
+            web_sources = [r['title'] for r in web_results[:3]]
+            logger.info(f"Web search completed, found {len(web_results)} results")
+    
+    # Build final context
+    context_parts = []
+    if rag_context:
+        context_parts.append(f"Document Context:\n{rag_context}")
+    if web_context:
+        context_parts.append(web_context)
+    
+    full_context = "\n\n".join(context_parts) if context_parts else ""
+    
+    # Build system prompt
+    if use_rag or use_web_search:
+        formatted_system_prompt = f"{base_system_prompt}\n\n{full_context}{source_info}"
+    else:
+        formatted_system_prompt = base_system_prompt
+    
+    # Prepare messages
     messages = [{"role": "system", "content": formatted_system_prompt}]
     for entry in history:
         messages.append(entry)
     messages.append({"role": "user", "content": message})
-    prompt = global_tokenizer.apply_chat_template(
+    
+    # Get EOS token and adjust stopping criteria
+    eos_token_id = medical_tokenizer.eos_token_id
+    if eos_token_id is None:
+        eos_token_id = medical_tokenizer.pad_token_id
+    
+    # Increase max tokens for medical models (prevent early stopping)
+    max_new_tokens = int(max_new_tokens) if isinstance(max_new_tokens, (int, float)) else 2048
+    max_new_tokens = max(max_new_tokens, 1024)  # Minimum 1024 tokens for medical answers
+    
+    prompt = medical_tokenizer.apply_chat_template(
         messages,
         tokenize=False,
         add_generation_prompt=True
     )
+    
+    inputs = medical_tokenizer(prompt, return_tensors="pt").to(medical_model_obj.device)
+    prompt_length = inputs['input_ids'].shape[1]
+    
     stop_event = threading.Event()
+    
     class StopOnEvent(StoppingCriteria):
         def __init__(self, stop_event):
             super().__init__()
@@ -376,13 +610,42 @@ def stream_chat(
 
         def __call__(self, input_ids, scores, **kwargs):
             return self.stop_event.is_set()
-    stopping_criteria = StoppingCriteriaList([StopOnEvent(stop_event)])
+    
+    # Custom stopping criteria that doesn't stop on EOS too early
+    class MedicalStoppingCriteria(StoppingCriteria):
+        def __init__(self, eos_token_id, prompt_length, min_new_tokens=100):
+            super().__init__()
+            self.eos_token_id = eos_token_id
+            self.prompt_length = prompt_length
+            self.min_new_tokens = min_new_tokens
+
+        def __call__(self, input_ids, scores, **kwargs):
+            current_length = input_ids.shape[1]
+            new_tokens = current_length - self.prompt_length
+            last_token = input_ids[0, -1].item()
+            
+            # Don't stop on EOS if we haven't generated enough new tokens
+            if new_tokens < self.min_new_tokens:
+                return False
+            # Allow EOS after minimum new tokens have been generated
+            return last_token == self.eos_token_id
+    
+    stopping_criteria = StoppingCriteriaList([
+        StopOnEvent(stop_event),
+        MedicalStoppingCriteria(eos_token_id, prompt_length, min_new_tokens=100)
+    ])
+    
     streamer = TextIteratorStreamer(
-        global_tokenizer,
+        medical_tokenizer,
         skip_prompt=True,
         skip_special_tokens=True
     )
-    inputs = global_tokenizer(prompt, return_tensors="pt").to(global_model.device)
+    
+    temperature = float(temperature) if isinstance(temperature, (int, float)) else 0.7
+    top_p = float(top_p) if isinstance(top_p, (int, float)) else 0.95
+    top_k = int(top_k) if isinstance(top_k, (int, float)) else 50
+    penalty = float(penalty) if isinstance(penalty, (int, float)) else 1.2
+    
     generation_kwargs = dict(
         inputs,
         streamer=streamer,
@@ -392,23 +655,36 @@ def stream_chat(
         top_k=top_k,
         repetition_penalty=penalty,
         do_sample=True,
-        stopping_criteria=stopping_criteria
+        stopping_criteria=stopping_criteria,
+        eos_token_id=eos_token_id,
+        pad_token_id=medical_tokenizer.pad_token_id or eos_token_id
     )
-    thread = threading.Thread(target=global_model.generate, kwargs=generation_kwargs)
+    
+    thread = threading.Thread(target=medical_model_obj.generate, kwargs=generation_kwargs)
     thread.start()
+    
     updated_history = history + [
-        {"role": "user", "content": message},
+        {"role": "user", "content": original_message},
         {"role": "assistant", "content": ""}
     ]
     yield updated_history
+    
     partial_response = ""
     try:
         for new_text in streamer:
             partial_response += new_text
             updated_history[-1]["content"] = partial_response
             yield updated_history
-        output_ids = global_tokenizer.encode(partial_response, return_tensors="pt")
-        yield updated_history
+        
+        # Translate back if needed
+        if needs_translation and partial_response:
+            logger.info(f"Translating response back to {original_lang}...")
+            translated_response = translate_text(partial_response, target_lang=original_lang, source_lang="en")
+            updated_history[-1]["content"] = translated_response
+            yield updated_history
+        else:
+            yield updated_history
+            
     except GeneratorExit:
         stop_event.set()
         thread.join()
@@ -446,13 +722,13 @@ def create_demo():
             with gr.Column(elem_classes="chatbot-container"):
                 chatbot = gr.Chatbot(
                     height=500,
-                    placeholder="Chat with your documents here... Type your question below.",
+                    placeholder="Chat with your medical documents here... Type your question below.",
                     show_label=False,
                     type="messages"
                 )
                 with gr.Row(elem_classes="input-row"):
                     message_input = gr.Textbox(
-                        placeholder="Type your question here...",
+                        placeholder="Type your medical question here...",
                         show_label=False,
                         container=False,
                         lines=1,
@@ -460,9 +736,28 @@ def create_demo():
                     )
                     submit_button = gr.Button("➤", elem_classes="submit-btn", scale=1)
                 
-                with gr.Accordion("Advanced Settings", open=False):
+                with gr.Accordion("⚙️ Advanced Settings", open=False):
+                    with gr.Row():
+                        use_rag = gr.Checkbox(
+                            value=True,
+                            label="Enable Document RAG",
+                            info="Answer based on uploaded documents"
+                        )
+                        use_web_search = gr.Checkbox(
+                            value=False,
+                            label="Enable Web Search (MCP)",
+                            info="Fetch knowledge from online medical resources"
+                        )
+                    
+                    medical_model = gr.Radio(
+                        choices=list(MEDSWIN_MODELS.keys()),
+                        value=DEFAULT_MEDICAL_MODEL,
+                        label="Medical Model",
+                        info="MedSwin SFT (default), others download on first use"
+                    )
+                    
                     system_prompt = gr.Textbox(
-                        value="As a knowledgeable assistant, your task is to provide detailed and context-rich answers based on the relevant information from all uploaded documents. When information is sourced from multiple documents, summarize the key points from each and explain how they relate, noting any connections or contradictions. Your response should be thorough, informative, and easy to understand.",
+                        value="As a medical specialist, provide detailed and accurate answers based on the provided medical documents and context. Ensure all information is clinically accurate and cite sources when available.",
                         label="System Prompt",
                         lines=3
                     )
@@ -472,15 +767,16 @@ def create_demo():
                             minimum=0,
                             maximum=1,
                             step=0.1,
-                            value=0.9,  
+                            value=0.7,  
                             label="Temperature"
                         )
                         max_new_tokens = gr.Slider(
-                            minimum=128,
-                            maximum=8192,
-                            step=64,
-                            value=1024,
+                            minimum=512,
+                            maximum=4096,
+                            step=128,
+                            value=2048,
                             label="Max New Tokens",
+                            info="Increased for medical models to prevent early stopping"
                         )
                         top_p = gr.Slider(
                             minimum=0.0,
@@ -532,7 +828,10 @@ def create_demo():
                         top_k, 
                         penalty,
                         retriever_k,
-                        merge_threshold
+                        merge_threshold,
+                        use_rag,
+                        medical_model,
+                        use_web_search
                     ],
                     outputs=chatbot
                 )
@@ -549,7 +848,10 @@ def create_demo():
                         top_k, 
                         penalty,
                         retriever_k,
-                        merge_threshold
+                        merge_threshold,
+                        use_rag,
+                        medical_model,
+                        use_web_search
                     ],
                     outputs=chatbot
                 )
@@ -557,6 +859,8 @@ def create_demo():
     return demo
 
 if __name__ == "__main__":
-    initialize_model_and_tokenizer()
+    # Initialize default medical model
+    logger.info("Initializing default medical model (MedSwin SFT)...")
+    initialize_medical_model(DEFAULT_MEDICAL_MODEL)
     demo = create_demo()
     demo.launch()
