@@ -5,6 +5,7 @@ import logging
 import torch
 import threading
 import time
+import json
 from transformers import (
     AutoModelForCausalLM,
     AutoTokenizer,
@@ -351,6 +352,249 @@ def get_llm_for_rag(temperature=0.7, max_new_tokens=256, top_p=0.95, top_k=50):
         }
     )
 
+def autonomous_reasoning(query: str, history: list) -> dict:
+    """
+    Autonomous reasoning: Analyze query complexity, intent, and information needs.
+    Returns reasoning analysis with query type, complexity, and required information sources.
+    """
+    global global_translation_model, global_translation_tokenizer
+    if global_translation_model is None or global_translation_tokenizer is None:
+        initialize_translation_model()
+    
+    reasoning_prompt = f"""Analyze this medical query and provide structured reasoning:
+
+Query: "{query}"
+
+Analyze:
+1. Query Type: (diagnosis, treatment, drug_info, symptom_analysis, research, general_info)
+2. Complexity: (simple, moderate, complex, multi_faceted)
+3. Information Needs: What specific information is required?
+4. Requires RAG: (yes/no) - Does this need document context?
+5. Requires Web Search: (yes/no) - Does this need current/updated information?
+6. Sub-questions: Break down into key sub-questions if complex
+
+Respond in JSON format:
+{{
+    "query_type": "...",
+    "complexity": "...",
+    "information_needs": ["..."],
+    "requires_rag": true/false,
+    "requires_web_search": true/false,
+    "sub_questions": ["..."]
+}}"""
+    
+    messages = [
+        {"role": "system", "content": "You are a medical reasoning system. Analyze queries systematically and provide structured JSON responses."},
+        {"role": "user", "content": reasoning_prompt}
+    ]
+    
+    prompt_text = global_translation_tokenizer.apply_chat_template(
+        messages,
+        tokenize=False,
+        add_generation_prompt=True
+    )
+    
+    inputs = global_translation_tokenizer(prompt_text, return_tensors="pt").to(global_translation_model.device)
+    
+    with torch.no_grad():
+        outputs = global_translation_model.generate(
+            **inputs,
+            max_new_tokens=512,
+            temperature=0.3,
+            do_sample=True,
+            pad_token_id=global_translation_tokenizer.eos_token_id
+        )
+    
+    response = global_translation_tokenizer.decode(outputs[0][inputs['input_ids'].shape[1]:], skip_special_tokens=True)
+    
+    # Parse JSON response (with fallback)
+    try:
+        # Extract JSON from response
+        json_start = response.find('{')
+        json_end = response.rfind('}') + 1
+        if json_start >= 0 and json_end > json_start:
+            reasoning = json.loads(response[json_start:json_end])
+        else:
+            raise ValueError("No JSON found")
+    except:
+        # Fallback reasoning
+        reasoning = {
+            "query_type": "general_info",
+            "complexity": "moderate",
+            "information_needs": ["medical information"],
+            "requires_rag": True,
+            "requires_web_search": False,
+            "sub_questions": [query]
+        }
+    
+    logger.info(f"Reasoning analysis: {reasoning}")
+    return reasoning
+
+def create_execution_plan(reasoning: dict, query: str, has_rag_index: bool) -> dict:
+    """
+    Planning: Create multi-step execution plan based on reasoning analysis.
+    Returns execution plan with steps and strategy.
+    """
+    plan = {
+        "steps": [],
+        "strategy": "sequential",
+        "iterations": 1
+    }
+    
+    # Determine execution strategy
+    if reasoning["complexity"] in ["complex", "multi_faceted"]:
+        plan["strategy"] = "iterative"
+        plan["iterations"] = 2
+    
+    # Step 1: Language detection and translation
+    plan["steps"].append({
+        "step": 1,
+        "action": "detect_language",
+        "description": "Detect query language and translate if needed"
+    })
+    
+    # Step 2: RAG retrieval (if needed and available)
+    if reasoning.get("requires_rag", True) and has_rag_index:
+        plan["steps"].append({
+            "step": 2,
+            "action": "rag_retrieval",
+            "description": "Retrieve relevant document context",
+            "parameters": {"top_k": 15, "merge_threshold": 0.5}
+        })
+    
+    # Step 3: Web search (if needed)
+    if reasoning.get("requires_web_search", False):
+        plan["steps"].append({
+            "step": 3,
+            "action": "web_search",
+            "description": "Search web for current/updated information",
+            "parameters": {"max_results": 5}
+        })
+    
+    # Step 4: Sub-question processing (if complex)
+    if reasoning.get("sub_questions") and len(reasoning["sub_questions"]) > 1:
+        plan["steps"].append({
+            "step": 4,
+            "action": "multi_step_reasoning",
+            "description": "Process sub-questions iteratively",
+            "sub_questions": reasoning["sub_questions"]
+        })
+    
+    # Step 5: Synthesis and answer generation
+    plan["steps"].append({
+        "step": len(plan["steps"]) + 1,
+        "action": "synthesize_answer",
+        "description": "Generate comprehensive answer from all sources"
+    })
+    
+    # Step 6: Self-reflection (for complex queries)
+    if reasoning["complexity"] in ["complex", "multi_faceted"]:
+        plan["steps"].append({
+            "step": len(plan["steps"]) + 1,
+            "action": "self_reflection",
+            "description": "Evaluate answer quality and completeness"
+        })
+    
+    logger.info(f"Execution plan created: {len(plan['steps'])} steps")
+    return plan
+
+def autonomous_execution_strategy(reasoning: dict, plan: dict, use_rag: bool, use_web_search: bool) -> dict:
+    """
+    Autonomous execution: Make decisions on information gathering strategy.
+    Overrides user settings if reasoning suggests better approach.
+    """
+    strategy = {
+        "use_rag": use_rag,
+        "use_web_search": use_web_search,
+        "reasoning_override": False,
+        "rationale": ""
+    }
+    
+    # Autonomous decision: Override if reasoning suggests different approach
+    if reasoning.get("requires_rag", False) and not use_rag:
+        strategy["use_rag"] = True
+        strategy["reasoning_override"] = True
+        strategy["rationale"] += "Reasoning suggests RAG is needed for this query. "
+    
+    if reasoning.get("requires_web_search", False) and not use_web_search:
+        strategy["use_web_search"] = True
+        strategy["reasoning_override"] = True
+        strategy["rationale"] += "Reasoning suggests web search for current information. "
+    
+    if strategy["reasoning_override"]:
+        logger.info(f"Autonomous override: {strategy['rationale']}")
+    
+    return strategy
+
+def self_reflection(answer: str, query: str, reasoning: dict) -> dict:
+    """
+    Self-reflection: Evaluate answer quality and completeness.
+    Returns reflection with quality score and improvement suggestions.
+    """
+    global global_translation_model, global_translation_tokenizer
+    if global_translation_model is None or global_translation_tokenizer is None:
+        initialize_translation_model()
+    
+    reflection_prompt = f"""Evaluate this medical answer for quality and completeness:
+
+Query: "{query}"
+Answer: "{answer[:1000]}"
+
+Evaluate:
+1. Completeness: Does it address all aspects of the query?
+2. Accuracy: Is the medical information accurate?
+3. Clarity: Is it clear and well-structured?
+4. Sources: Are sources cited appropriately?
+5. Missing Information: What important information might be missing?
+
+Respond in JSON:
+{{
+    "completeness_score": 0-10,
+    "accuracy_score": 0-10,
+    "clarity_score": 0-10,
+    "overall_score": 0-10,
+    "missing_aspects": ["..."],
+    "improvement_suggestions": ["..."]
+}}"""
+    
+    messages = [
+        {"role": "system", "content": "You are a medical answer quality evaluator. Provide honest, constructive feedback."},
+        {"role": "user", "content": reflection_prompt}
+    ]
+    
+    prompt_text = global_translation_tokenizer.apply_chat_template(
+        messages,
+        tokenize=False,
+        add_generation_prompt=True
+    )
+    
+    inputs = global_translation_tokenizer(prompt_text, return_tensors="pt").to(global_translation_model.device)
+    
+    with torch.no_grad():
+        outputs = global_translation_model.generate(
+            **inputs,
+            max_new_tokens=256,
+            temperature=0.3,
+            do_sample=True,
+            pad_token_id=global_translation_tokenizer.eos_token_id
+        )
+    
+    response = global_translation_tokenizer.decode(outputs[0][inputs['input_ids'].shape[1]:], skip_special_tokens=True)
+    
+    import json
+    try:
+        json_start = response.find('{')
+        json_end = response.rfind('}') + 1
+        if json_start >= 0 and json_end > json_start:
+            reflection = json.loads(response[json_start:json_end])
+        else:
+            reflection = {"overall_score": 7, "improvement_suggestions": []}
+    except:
+        reflection = {"overall_score": 7, "improvement_suggestions": []}
+    
+    logger.info(f"Self-reflection score: {reflection.get('overall_score', 'N/A')}")
+    return reflection
+
 def extract_text_from_document(file):
     file_name = file.name
     file_extension = os.path.splitext(file_name)[1].lower()
@@ -493,7 +737,32 @@ def stream_chat(
         yield history + [{"role": "assistant", "content": "Session initialization failed. Please refresh the page."}]
         return
     
-    # Detect language and translate if needed
+    user_id = request.session_hash
+    index_dir = f"./{user_id}_index"
+    has_rag_index = os.path.exists(index_dir)
+    
+    # ===== AUTONOMOUS REASONING =====
+    logger.info("🤔 Starting autonomous reasoning...")
+    reasoning = autonomous_reasoning(message, history)
+    
+    # ===== PLANNING =====
+    logger.info("📋 Creating execution plan...")
+    plan = create_execution_plan(reasoning, message, has_rag_index)
+    
+    # ===== AUTONOMOUS EXECUTION STRATEGY =====
+    logger.info("🎯 Determining execution strategy...")
+    execution_strategy = autonomous_execution_strategy(reasoning, plan, use_rag, use_web_search)
+    
+    # Use autonomous strategy decisions
+    final_use_rag = execution_strategy["use_rag"]
+    final_use_web_search = execution_strategy["use_web_search"]
+    
+    # Show reasoning override message if applicable
+    reasoning_note = ""
+    if execution_strategy["reasoning_override"]:
+        reasoning_note = f"\n\n💡 *Autonomous Reasoning: {execution_strategy['rationale']}*"
+    
+    # Detect language and translate if needed (Step 1 of plan)
     original_lang = detect_language(message)
     original_message = message
     needs_translation = original_lang != "en"
@@ -503,26 +772,27 @@ def stream_chat(
         message = translate_text(message, target_lang="en", source_lang=original_lang)
         logger.info(f"Translated query: {message}")
     
-    user_id = request.session_hash
-    index_dir = f"./{user_id}_index"
-    
     # Initialize medical model
     medical_model_obj, medical_tokenizer = initialize_medical_model(medical_model)
     
-    # Adjust system prompt based on RAG setting
-    if use_rag:
-        if not os.path.exists(index_dir):
+    # Adjust system prompt based on RAG setting and reasoning
+    if final_use_rag:
+        if not has_rag_index:
             yield history + [{"role": "assistant", "content": "Please upload documents first to use RAG."}]
             return
         
-        base_system_prompt = system_prompt if system_prompt else "As a medical specialist, provide detailed and accurate answers based on the provided medical documents."
+        base_system_prompt = system_prompt if system_prompt else "As a medical specialist, provide clinical and concise answers based on the provided medical documents and context."
     else:
         base_system_prompt = "As a medical specialist, provide short and concise clinical answers. Be brief and avoid lengthy explanations. Focus on key medical facts only."
     
-    # Get RAG context if enabled
+    # Add reasoning context to system prompt for complex queries
+    if reasoning["complexity"] in ["complex", "multi_faceted"]:
+        base_system_prompt += f"\n\nQuery Analysis: This is a {reasoning['complexity']} {reasoning['query_type']} query. Address all sub-questions: {', '.join(reasoning.get('sub_questions', [])[:3])}"
+    
+    # ===== EXECUTION: RAG Retrieval (Step 2) =====
     rag_context = ""
     source_info = ""
-    if use_rag and os.path.exists(index_dir):
+    if final_use_rag and has_rag_index:
         embed_model = HuggingFaceEmbedding(model_name=EMBEDDING_MODEL, token=HF_TOKEN)
         Settings.embed_model = embed_model
         storage_context = StorageContext.from_defaults(persist_dir=index_dir)
@@ -550,15 +820,15 @@ def stream_chat(
         if merged_file_sources:
             source_info = "\n\nRetrieved information from files: " + ", ".join(merged_file_sources.keys())
     
-    # Get web search context if enabled
+    # ===== EXECUTION: Web Search (Step 3) =====
     web_context = ""
     web_sources = []
-    if use_web_search:
-        logger.info("Performing web search...")
+    if final_use_web_search:
+        logger.info("🌐 Performing web search (MCP)...")
         web_results = search_web(message, max_results=5)
         if web_results:
             web_summary = summarize_web_content(web_results, message)
-            web_context = f"\n\nAdditional Web Sources:\n{web_summary}"
+            web_context = f"\n\nAdditional Web Sources (MCP):\n{web_summary}"
             web_sources = [r['title'] for r in web_results[:3]]
             logger.info(f"Web search completed, found {len(web_results)} results")
     
@@ -572,7 +842,7 @@ def stream_chat(
     full_context = "\n\n".join(context_parts) if context_parts else ""
     
     # Build system prompt
-    if use_rag or use_web_search:
+    if final_use_rag or final_use_web_search:
         formatted_system_prompt = f"{base_system_prompt}\n\n{full_context}{source_info}"
     else:
         formatted_system_prompt = base_system_prompt
@@ -675,6 +945,24 @@ def stream_chat(
             partial_response += new_text
             updated_history[-1]["content"] = partial_response
             yield updated_history
+        
+        # ===== SELF-REFLECTION (Step 6) =====
+        if reasoning["complexity"] in ["complex", "multi_faceted"]:
+            logger.info("🔍 Performing self-reflection on answer quality...")
+            reflection = self_reflection(partial_response, message, reasoning)
+            
+            # Add reflection note if score is low or improvements suggested
+            if reflection.get("overall_score", 10) < 7 or reflection.get("improvement_suggestions"):
+                reflection_note = f"\n\n---\n**Self-Reflection** (Score: {reflection.get('overall_score', 'N/A')}/10)"
+                if reflection.get("improvement_suggestions"):
+                    reflection_note += f"\n💡 Suggestions: {', '.join(reflection['improvement_suggestions'][:2])}"
+                partial_response += reflection_note
+                updated_history[-1]["content"] = partial_response
+        
+        # Add reasoning note if autonomous override occurred
+        if reasoning_note:
+            partial_response = reasoning_note + "\n\n" + partial_response
+            updated_history[-1]["content"] = partial_response
         
         # Translate back if needed
         if needs_translation and partial_response:
