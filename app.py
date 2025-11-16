@@ -223,9 +223,14 @@ def initialize_tts_model():
     """Initialize TTS model for text-to-speech"""
     global global_tts_model
     if global_tts_model is None:
-        logger.info("Initializing TTS model for voice generation...")
-        global_tts_model = TTS(model_name=TTS_MODEL, progress_bar=False)
-        logger.info("TTS model initialized successfully")
+        try:
+            logger.info("Initializing TTS model for voice generation...")
+            global_tts_model = TTS(model_name=TTS_MODEL, progress_bar=False)
+            logger.info("TTS model initialized successfully")
+        except Exception as e:
+            logger.warning(f"TTS model initialization failed: {e}")
+            logger.warning("TTS features will be disabled. If pyworld dependency is missing, try: pip install pyworld")
+            global_tts_model = None
     return global_tts_model
 
 def transcribe_audio(audio):
@@ -265,6 +270,10 @@ def generate_speech(text: str):
     global global_tts_model
     if global_tts_model is None:
         initialize_tts_model()
+    
+    if global_tts_model is None:
+        logger.error("TTS model not available. Please check dependencies.")
+        return None
     
     if not text or len(text.strip()) == 0:
         return None
@@ -1345,7 +1354,15 @@ if __name__ == "__main__":
     logger.info("Preloading Whisper model...")
     initialize_whisper_model()
     logger.info("Preloading TTS model...")
-    initialize_tts_model()
-    logger.info("All models preloaded successfully!")
+    try:
+        initialize_tts_model()
+        if global_tts_model is not None:
+            logger.info("TTS model preloaded successfully!")
+        else:
+            logger.warning("TTS model not available - voice generation will be disabled")
+    except Exception as e:
+        logger.warning(f"TTS model preloading failed: {e}")
+        logger.warning("Voice generation features will be disabled")
+    logger.info("Model preloading complete!")
     demo = create_demo()
     demo.launch()

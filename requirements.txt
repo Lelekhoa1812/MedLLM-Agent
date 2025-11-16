@@ -14,9 +14,13 @@ google-genai
 langdetect
 requests
 beautifulsoup4
-duckduckgo-search
+ddgs
 gradio
 spaces
 openai-whisper
-TTS
 soundfile
+numpy<2.0.0
+setuptools>=65.0.0
+# TTS installation - if pyworld fails, TTS will work without it for most models
+# For maya1 model, try: pip install TTS --no-deps && pip install coqui-tts
+TTS
