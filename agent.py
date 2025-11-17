@@ -237,7 +237,7 @@ async def call_tool(name: str, arguments: dict) -> Sequence[TextContent | ImageC
                     logger.info(f"✅ Gemini generated content successfully ({len(response.text)} chars)")
                     return [TextContent(type="text", text=response.text)]
                 elif response and hasattr(response, 'candidates') and response.candidates:
-                    # Try to extract text from candidates
+                    # Try to extract text from candidates if response is a list of candidates
                     text_parts = []
                     for candidate in response.candidates:
                         if hasattr(candidate, 'content') and hasattr(candidate.content, 'parts'):
