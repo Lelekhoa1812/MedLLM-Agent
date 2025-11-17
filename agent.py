@@ -32,15 +32,16 @@ except ImportError:
     sys.exit(1)
 
 # Configure logging
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+# Use DEBUG level to see all MCP protocol messages
+logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-# Suppress warnings from MCP SDK during initialization
-# These warnings are expected during the initialization handshake
+# Enable detailed logging for MCP protocol debugging
+# We want to see what requests the server receives
 mcp_logger = logging.getLogger("mcp")
-mcp_logger.setLevel(logging.ERROR)  # Only show errors, suppress warnings during init
+mcp_logger.setLevel(logging.DEBUG)  # Show all MCP protocol messages for debugging
 root_logger = logging.getLogger("root")
-root_logger.setLevel(logging.ERROR)  # Suppress root logger warnings during init
+root_logger.setLevel(logging.INFO)  # Show info level for root logger
 
 # Initialize Gemini
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
@@ -121,48 +122,56 @@ def prepare_gemini_files(files: list) -> list:
 async def list_tools() -> list[Tool]:
     """List available tools"""
     logger.info("📋 MCP server received list_tools request")
-    tools = [
-        Tool(
-            name="generate_content",
-            description="Generate content using Gemini AI. Supports text generation, translation, summarization, document parsing, and audio transcription.",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "user_prompt": {
-                        "type": "string",
-                        "description": "User prompt for generation (required)"
-                    },
-                    "system_prompt": {
-                        "type": "string",
-                        "description": "System prompt to guide AI behavior (optional)"
-                    },
-                    "files": {
-                        "type": "array",
-                        "description": "Array of files to include in generation (optional)",
-                        "items": {
-                            "type": "object",
-                            "properties": {
-                                "path": {"type": "string", "description": "Path to file"},
-                                "content": {"type": "string", "description": "Base64 encoded file content"},
-                                "type": {"type": "string", "description": "MIME type (auto-detected from file extension)"}
+    logger.debug("list_tools() called - preparing tool list")
+    try:
+        tools = [
+            Tool(
+                name="generate_content",
+                description="Generate content using Gemini AI. Supports text generation, translation, summarization, document parsing, and audio transcription.",
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "user_prompt": {
+                            "type": "string",
+                            "description": "User prompt for generation (required)"
+                        },
+                        "system_prompt": {
+                            "type": "string",
+                            "description": "System prompt to guide AI behavior (optional)"
+                        },
+                        "files": {
+                            "type": "array",
+                            "description": "Array of files to include in generation (optional)",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "path": {"type": "string", "description": "Path to file"},
+                                    "content": {"type": "string", "description": "Base64 encoded file content"},
+                                    "type": {"type": "string", "description": "MIME type (auto-detected from file extension)"}
+                                }
                             }
+                        },
+                        "model": {
+                            "type": "string",
+                            "description": f"Gemini model to use (default: {GEMINI_MODEL})"
+                        },
+                        "temperature": {
+                            "type": "number",
+                            "description": f"Temperature for generation 0-2 (default: {GEMINI_TEMPERATURE})"
                         }
                     },
-                    "model": {
-                        "type": "string",
-                        "description": f"Gemini model to use (default: {GEMINI_MODEL})"
-                    },
-                    "temperature": {
-                        "type": "number",
-                        "description": f"Temperature for generation 0-2 (default: {GEMINI_TEMPERATURE})"
-                    }
-                },
-                "required": ["user_prompt"]
-            }
-        )
-    ]
-    logger.info(f"✅ MCP server returning {len(tools)} tools")
-    return tools
+                    "required": ["user_prompt"]
+                }
+            )
+        ]
+        logger.info(f"✅ MCP server returning {len(tools)} tools: {[t.name for t in tools]}")
+        logger.debug(f"Tool details: {tools[0].name} - {tools[0].description[:50]}...")
+        return tools
+    except Exception as e:
+        logger.error(f"❌ Error in list_tools(): {e}")
+        import traceback
+        logger.debug(f"list_tools error traceback:\n{traceback.format_exc()}")
+        raise
 
 @app.call_tool()
 async def call_tool(name: str, arguments: dict) -> Sequence[TextContent | ImageContent | EmbeddedResource]:
@@ -271,28 +280,30 @@ async def call_tool(name: str, arguments: dict) -> Sequence[TextContent | ImageC
 
 async def main():
     """Main entry point"""
+    logger.info("=" * 60)
     logger.info("Starting Gemini MCP Server...")
     logger.info(f"Gemini API Key: {'Set' if GEMINI_API_KEY else 'Not Set'}")
     logger.info(f"Default Model: {GEMINI_MODEL}")
     logger.info(f"Default Lite Model: {GEMINI_MODEL_LITE}")
+    logger.info("=" * 60)
     
     # Use stdio_server from mcp.server.stdio
     from mcp.server.stdio import stdio_server
     
-    # Suppress root logger warnings during initialization
-    # These are expected during the MCP initialization handshake
+    # Keep logging enabled for debugging
     original_root_level = logging.getLogger("root").level
-    logging.getLogger("root").setLevel(logging.ERROR)
+    logging.getLogger("root").setLevel(logging.INFO)
     
     try:
+        logger.info("🔄 Setting up stdio_server...")
         async with stdio_server() as streams:
-            # Restore logging after initialization
-            logging.getLogger("root").setLevel(original_root_level)
-            logger.info("✅ MCP server stdio streams ready, starting server...")
+            logger.info("✅ MCP server stdio streams ready")
+            logger.debug(f"Streams: read={type(streams[0])}, write={type(streams[1])}")
             
             # Create initialization options
             # The Server class will automatically provide its capabilities based on
             # the registered @app.list_tools() and @app.call_tool() handlers
+            logger.debug("Preparing server capabilities...")
             try:
                 # Try to get capabilities from the server if the method exists
                 if hasattr(app, 'get_capabilities'):
@@ -303,39 +314,58 @@ async def main():
                             notification_options=NotificationOptions(),
                             experimental_capabilities={}
                         )
-                    except (ImportError, AttributeError, TypeError):
+                        logger.debug(f"Got capabilities with NotificationOptions: {server_capabilities}")
+                    except (ImportError, AttributeError, TypeError) as e:
+                        logger.debug(f"NotificationOptions not available: {e}, trying without...")
                         # Fallback: try without NotificationOptions
                         try:
                             server_capabilities = app.get_capabilities()
-                        except:
+                            logger.debug(f"Got capabilities: {server_capabilities}")
+                        except Exception as e2:
+                            logger.debug(f"get_capabilities() failed: {e2}, using empty dict")
                             # If get_capabilities doesn't work, create minimal capabilities
                             server_capabilities = {}
                 else:
+                    logger.debug("Server doesn't have get_capabilities method, using empty dict")
                     # Server will provide capabilities automatically, use empty dict
                     server_capabilities = {}
             except Exception as e:
-                logger.debug(f"Could not get server capabilities: {e}, server will provide defaults")
+                logger.warning(f"Could not get server capabilities: {e}, server will provide defaults")
+                import traceback
+                logger.debug(f"Capabilities error traceback:\n{traceback.format_exc()}")
                 # Server will handle capabilities automatically
                 server_capabilities = {}
             
             # Create initialization options
             # The server_name and server_version are required
             # Capabilities will be automatically determined by the Server from registered handlers
+            logger.info("📋 Creating initialization options...")
             init_options = InitializationOptions(
                 server_name="gemini-mcp-server",
                 server_version="1.0.0",
                 capabilities=server_capabilities
             )
+            logger.debug(f"Initialization options: {init_options}")
             
             # Run the server with initialization options
-            await app.run(
-                read_stream=streams[0],
-                write_stream=streams[1],
-                initialization_options=init_options
-            )
+            logger.info("🚀 Starting MCP server run loop...")
+            logger.info("   Server is ready to accept requests")
+            try:
+                await app.run(
+                    read_stream=streams[0],
+                    write_stream=streams[1],
+                    initialization_options=init_options
+                )
+            except Exception as run_error:
+                logger.error(f"❌ Error in app.run(): {run_error}")
+                import traceback
+                logger.debug(f"app.run() error traceback:\n{traceback.format_exc()}")
+                raise
     except Exception as e:
         logging.getLogger("root").setLevel(original_root_level)
-        logger.error(f"❌ MCP server error: {e}")
+        logger.error(f"❌ MCP server fatal error: {type(e).__name__}: {e}")
+        import traceback
+        logger.debug(f"Server error traceback:\n{traceback.format_exc()}")
         raise
 
 if __name__ == "__main__":
