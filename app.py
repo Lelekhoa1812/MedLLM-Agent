@@ -364,13 +364,15 @@ async def get_mcp_session():
             return None
         
         # Wait for the server to be fully ready after initialization
-        logger.debug("Waiting for server to be ready after initialization...")
-        await asyncio.sleep(1.0)  # Wait after initialization
+        # The server needs time to process the initialization and send the 'initialized' notification
+        # According to MCP protocol, after initialize response, server sends initialized notification
+        logger.debug("Waiting for server to complete initialization (including initialized notification)...")
+        await asyncio.sleep(2.0)  # Increased wait for server to complete initialization
         
         # Verify the session works by listing tools with retries
         # This confirms the server is ready to handle requests
         logger.info("🔍 Verifying MCP session by listing tools...")
-        max_init_retries = 5
+        max_init_retries = 3
         tools_listed = False
         tools = None
         last_error = None
@@ -388,7 +390,9 @@ async def get_mcp_session():
                 else:
                     logger.warning(f"list_tools() returned empty or invalid result: {tools}")
                     if init_attempt < max_init_retries - 1:
-                        await asyncio.sleep(0.5 * (init_attempt + 1))
+                        wait_time = 1.0 * (init_attempt + 1)  # Longer waits
+                        logger.debug(f"Empty result, waiting {wait_time}s before retry...")
+                        await asyncio.sleep(wait_time)
                         continue
             except Exception as e:
                 last_error = e
@@ -396,9 +400,21 @@ async def get_mcp_session():
                 error_msg = str(e)
                 error_type = type(e).__name__
                 
+                # Check error data for more details
+                error_data_msg = ""
+                if hasattr(e, '__dict__') and 'error' in e.__dict__:
+                    error_obj = e.__dict__.get('error')
+                    if hasattr(error_obj, 'message'):
+                        error_data_msg = error_obj.message.lower()
+                    elif hasattr(error_obj, 'data') and error_obj.data:
+                        error_data_msg = str(error_obj.data).lower()
+                
+                # Combine error messages for detection
+                combined_error = f"{error_str} {error_data_msg}"
+                
                 logger.error(f"❌ list_tools() failed (attempt {init_attempt + 1}/{max_init_retries}): {error_type}: {error_msg}")
                 
-                # Log detailed error information
+                # Log detailed error information on first attempt
                 if init_attempt == 0:
                     import traceback
                     logger.debug(f"First list_tools attempt error traceback:\n{traceback.format_exc()}")
@@ -407,26 +423,29 @@ async def get_mcp_session():
                     if hasattr(e, '__dict__'):
                         logger.debug(f"Error dict: {e.__dict__}")
                 
-                # Handle different error types
-                if "initialization" in error_str or "before initialization" in error_str or "not initialized" in error_str:
+                # Handle "initialization not complete" errors specifically
+                # This is the key issue: server says "Received request before initialization was complete"
+                if ("initialization" in combined_error or 
+                    "before initialization" in combined_error or 
+                    "not initialized" in combined_error or
+                    "initialization was complete" in combined_error):
                     if init_attempt < max_init_retries - 1:
-                        wait_time = 0.5 * (init_attempt + 1)
-                        logger.debug(f"Server still initializing, waiting {wait_time}s...")
+                        # Progressive wait: 2s, 3s, 4s, etc. for initialization issues
+                        wait_time = 2.0 + (init_attempt * 1.0)
+                        logger.warning(f"⚠️ Server initialization not complete yet (attempt {init_attempt + 1}/{max_init_retries})")
+                        logger.debug(f"   Waiting {wait_time}s for server to finish initialization...")
                         await asyncio.sleep(wait_time)
                         continue
-                elif "invalid request" in error_str or "invalid request parameters" in error_str:
-                    # This is the key error we're seeing - log more details
-                    logger.error(f"⚠️ Invalid request parameters error detected. This may indicate:")
-                    logger.error(f"   1. Server not ready to accept requests yet")
-                    logger.error(f"   2. Initialization handshake incomplete")
-                    logger.error(f"   3. Protocol version mismatch")
+                elif "invalid request" in combined_error or "invalid request parameters" in combined_error:
+                    # Invalid request often means server not ready - treat similar to initialization
                     if init_attempt < max_init_retries - 1:
-                        wait_time = 1.0 * (init_attempt + 1)  # Longer wait for invalid request errors
-                        logger.debug(f"Waiting {wait_time}s before retry...")
+                        wait_time = 2.0 + (init_attempt * 1.0)  # Longer wait for invalid request errors
+                        logger.warning(f"⚠️ Invalid request parameters - server may not be ready (attempt {init_attempt + 1}/{max_init_retries})")
+                        logger.debug(f"   Waiting {wait_time}s before retry...")
                         await asyncio.sleep(wait_time)
                         continue
                 elif init_attempt < max_init_retries - 1:
-                    wait_time = 0.5 * (init_attempt + 1)
+                    wait_time = 1.0 * (init_attempt + 1)
                     logger.debug(f"Waiting {wait_time}s before retry...")
                     await asyncio.sleep(wait_time)
                 else:
