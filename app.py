@@ -1860,14 +1860,14 @@ def stream_chat(
     # ===== MAC ARCHITECTURE: GEMINI SUPERVISOR + MEDSWIN SPECIALIST =====
     # All internal thoughts are logged, only final answer is displayed
     
-        original_lang = detect_language(message)
-        original_message = message
-        needs_translation = original_lang != "en"
-        
-        if needs_translation:
-        logger.info(f"[GEMINI SUPERVISOR] Detected non-English language: {original_lang}, translating...")
-            message = translate_text(message, target_lang="en", source_lang=original_lang)
-        logger.info(f"[GEMINI SUPERVISOR] Translated query: {message[:100]}...")
+    original_lang = detect_language(message)
+    original_message = message
+    needs_translation = original_lang != "en"
+    
+    if needs_translation:
+    logger.info(f"[GEMINI SUPERVISOR] Detected non-English language: {original_lang}, translating...")
+        message = translate_text(message, target_lang="en", source_lang=original_lang)
+    logger.info(f"[GEMINI SUPERVISOR] Translated query: {message[:100]}...")
     
     # Determine final modes (respect user settings and availability)
     final_use_rag = use_rag and has_rag_index and not disable_agentic_reasoning
@@ -2055,7 +2055,7 @@ def stream_chat(
                 citations_text = "\n\n**Sources:** " + ", ".join(citation_links)
         
     # Add speaker icon
-        speaker_icon = ' 🔊'
+    speaker_icon = ' 🔊'
     final_answer_with_metadata = final_answer + citations_text + speaker_icon
         
     # Update history with final answer (ONLY final answer, no internal thoughts)
