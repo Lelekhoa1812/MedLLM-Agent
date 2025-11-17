@@ -1172,6 +1172,135 @@ def autonomous_execution_strategy(reasoning: dict, plan: dict, use_rag: bool, us
     
     return strategy
 
+async def gemini_supervisor_directives_async(query: str, reasoning: dict, plan: dict, time_elapsed: float, max_duration: int = 120) -> dict:
+    """Request supervisor-style task breakdown from Gemini MCP"""
+    remaining_time = max(15, max_duration - time_elapsed)
+    plan_json = json.dumps(plan)
+    reasoning_json = json.dumps(reasoning)
+    
+    prompt = f"""You supervise a MedSwin medical specialist model that has a limited output window (~800 tokens).
+Break the following medical query into concise sequential tasks so MedSwin can answer step-by-step.
+
+Query: "{query}"
+Reasoning Analysis: {reasoning_json}
+Existing Plan: {plan_json}
+Time Remaining (soft limit): ~{remaining_time:.1f}s (hard limit {max_duration}s). Avoid more than 3 tasks. 
+
+Return JSON with:
+{{
+  "overall_strategy": "short summary of approach (<=200 chars)",
+  "tasks": [
+    {{"id": 1, "instruction": "concrete directive for MedSwin", "expected_tokens": 200, "challenge": "optional short challenge to double-check"}},
+    ...
+  ],
+  "fast_track": true/false,  # true if remaining_time < 25s
+  "escalation_prompt": "optional single-line reminder to wrap up quickly if time is low"
+}}
+
+Ensure tasks reference medical reasoning and are ordered so MedSwin can execute one-by-one."""
+    
+    system_prompt = (
+        "You are Gemini MCP supervising a constrained MedSwin model. "
+        "Produce structured JSON that keeps MedSwin focused and concise."
+    )
+    
+    response = await call_agent(
+        user_prompt=prompt,
+        system_prompt=system_prompt,
+        model=GEMINI_MODEL,
+        temperature=0.3
+    )
+    
+    try:
+        start = response.find('{')
+        end = response.rfind('}') + 1
+        if start >= 0 and end > start:
+            directives = json.loads(response[start:end])
+        else:
+            raise ValueError("Supervisor JSON not found")
+    except Exception as exc:
+        logger.error(f"Supervisor directive parsing failed: {exc}")
+        directives = {
+            "overall_strategy": "Address tasks sequentially with concise clinical bullets.",
+            "tasks": [
+                {"id": 1, "instruction": "Summarize the patient's core question.", "expected_tokens": 120},
+                {"id": 2, "instruction": "List key clinical insights or differential items.", "expected_tokens": 200},
+                {"id": 3, "instruction": "Deliver final guidance and follow-up recommendations.", "expected_tokens": 180},
+            ],
+            "fast_track": remaining_time < 25,
+            "escalation_prompt": "Wrap up immediately if time is almost over."
+        }
+    return directives
+
+def gemini_supervisor_directives(query: str, reasoning: dict, plan: dict, time_elapsed: float, max_duration: int = 120) -> dict:
+    """Wrapper to obtain supervisor directives synchronously"""
+    if not MCP_AVAILABLE:
+        logger.warning("Gemini MCP unavailable for supervisor directives, using fallback.")
+        return {
+            "overall_strategy": "Follow the internal plan sequentially with concise sections.",
+            "tasks": [
+                {"id": step_idx + 1, "instruction": step.get("description", step.get("action", "")), "expected_tokens": 180}
+                for step_idx, step in enumerate(plan.get("steps", [])[:3])
+            ],
+            "fast_track": False,
+            "escalation_prompt": ""
+        }
+    
+    try:
+        loop = asyncio.get_event_loop()
+        if loop.is_running():
+            try:
+                import nest_asyncio
+                return nest_asyncio.run(
+                    gemini_supervisor_directives_async(query, reasoning, plan, time_elapsed, max_duration)
+                )
+            except Exception as exc:
+                logger.error(f"Nested supervisor directive execution failed: {exc}")
+                raise
+        return loop.run_until_complete(
+            gemini_supervisor_directives_async(query, reasoning, plan, time_elapsed, max_duration)
+        )
+    except Exception as exc:
+        logger.error(f"Supervisor directive request failed: {exc}")
+        return {
+            "overall_strategy": "Provide a concise clinical answer with numbered mini-sections.",
+            "tasks": [
+                {"id": 1, "instruction": "Clarify the medical problem and relevant context.", "expected_tokens": 150},
+                {"id": 2, "instruction": "Give evidence-based assessment or reasoning.", "expected_tokens": 200},
+                {"id": 3, "instruction": "State actionable guidance and cautions.", "expected_tokens": 150},
+            ],
+            "fast_track": True,
+            "escalation_prompt": "Deliver the final summary immediately if time is nearly done."
+        }
+
+def format_supervisor_directives_text(directives: dict) -> str:
+    """Convert supervisor directive dict into prompt-friendly text"""
+    if not directives:
+        return ""
+    
+    lines = []
+    overall = directives.get("overall_strategy")
+    if overall:
+        lines.append(f"Supervisor Strategy: {overall}")
+    
+    tasks = directives.get("tasks") or []
+    for task in tasks:
+        task_id = task.get("id")
+        instruction = task.get("instruction", "").strip()
+        challenge = task.get("challenge", "").strip()
+        expected_tokens = task.get("expected_tokens", 180)
+        if instruction:
+            task_line = f"{task_id}. {instruction} (target ≤{expected_tokens} tokens)"
+            if challenge:
+                task_line += f" | Challenge: {challenge}"
+            lines.append(task_line)
+    
+    escalation = directives.get("escalation_prompt")
+    if escalation:
+        lines.append(f"Escalation: {escalation}")
+    
+    return "\n".join(lines)
+
 async def self_reflection_gemini(answer: str, query: str) -> dict:
     """Self-reflection using Gemini MCP"""
     reflection_prompt = f"""Evaluate this medical answer for quality and completeness:
@@ -1239,138 +1368,6 @@ def self_reflection(answer: str, query: str, reasoning: dict) -> dict:
         logger.error(f"Gemini MCP reflection error: {e}")
     
     return {"overall_score": 7, "improvement_suggestions": []}
-
-def _truncate_text(text: str, max_chars: int = 4000) -> str:
-    """Utility to keep prompts within model limits."""
-    if not text:
-        return ""
-    text = text.strip()
-    if len(text) <= max_chars:
-        return text
-    return text[:max_chars] + "... (truncated)"
-
-async def enhance_answer_with_gemini_async(
-    query: str,
-    initial_answer: str,
-    rag_context: str = "",
-    web_context: str = "",
-    reasoning: dict = None,
-    reflection: dict = None
-) -> str:
-    """Use Gemini MCP to expand and validate the medical answer with multi-step reasoning."""
-    if not MCP_AVAILABLE:
-        return ""
-    
-    evidence_sections = []
-    if rag_context:
-        evidence_sections.append(f"Document Evidence:\n{_truncate_text(rag_context, 3500)}")
-    if web_context:
-        evidence_sections.append(f"Web Evidence:\n{_truncate_text(web_context, 3500)}")
-    evidence_block = "\n\n".join(evidence_sections) if evidence_sections else "No external evidence provided."
-    
-    reasoning_summary = ""
-    if reasoning:
-        reasoning_summary = json.dumps({
-            "query_type": reasoning.get("query_type"),
-            "complexity": reasoning.get("complexity"),
-            "sub_questions": reasoning.get("sub_questions", [])
-        }, ensure_ascii=False)
-    
-    reflection_summary = ""
-    if reflection:
-        reflection_summary = json.dumps(reflection, ensure_ascii=False)
-    
-    enhancer_prompt = f"""You are the Gemini MCP Response Enhancer working with a medical specialist model that produced a short draft answer.
-Task: Reason through the evidence, validate every claim, challenge gaps, and then produce a substantially more detailed final answer.
-
-Query:
-{query}
-
-Initial Draft Answer:
-{initial_answer}
-
-Reasoning Summary (optional):
-{reasoning_summary or "None"}
-
-Self-Reflection Feedback (optional):
-{reflection_summary or "None"}
-
-Evidence You Can Rely On:
-{evidence_block}
-
-Process:
-1. Think step-by-step about what the query truly needs and whether the draft covers it.
-2. Identify inaccuracies, missing context, or shallow explanations using the evidence.
-3. Produce an enhanced answer that is longer, clinically thorough, and clearly structured.
-4. When citing, refer to Document Evidence or Web Evidence explicitly (e.g., [Document], [Web]).
-5. Keep internal reasoning private; only share the final enhanced answer.
-
-Format:
-- Start with a concise summary paragraph.
-- Follow with detailed sections (Assessment, Supporting Evidence, Recommendations, Monitoring/Risks).
-- Conclude with a short bullet list of key takeaways.
-
-The final answer should be at least 3 paragraphs when evidence exists. Do not mention this instruction."""
-    
-    enhanced = await call_agent(
-        user_prompt=enhancer_prompt,
-        system_prompt="You are a diligent medical editor. Deliberate internally, then share only the finalized enhanced answer with structured sections.",
-        model=GEMINI_MODEL,
-        temperature=0.4
-    )
-    
-    return enhanced.strip() if enhanced else ""
-
-def enhance_answer_with_gemini(
-    query: str,
-    initial_answer: str,
-    rag_context: str = "",
-    web_context: str = "",
-    reasoning: dict = None,
-    reflection: dict = None
-) -> str:
-    """Sync wrapper for the Gemini response enhancer."""
-    if not MCP_AVAILABLE or not initial_answer:
-        return ""
-    
-    try:
-        loop = asyncio.get_event_loop()
-    except RuntimeError:
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-    
-    try:
-        if loop.is_running():
-            try:
-                import nest_asyncio
-                enhanced = nest_asyncio.run(
-                    enhance_answer_with_gemini_async(
-                        query=query,
-                        initial_answer=initial_answer,
-                        rag_context=rag_context,
-                        web_context=web_context,
-                        reasoning=reasoning,
-                        reflection=reflection
-                    )
-                )
-                return enhanced
-            except Exception as e:
-                logger.error(f"Error in nested async enhancement: {e}")
-                return ""
-        else:
-            return loop.run_until_complete(
-                enhance_answer_with_gemini_async(
-                    query=query,
-                    initial_answer=initial_answer,
-                    rag_context=rag_context,
-                    web_context=web_context,
-                    reasoning=reasoning,
-                    reflection=reflection
-                )
-            )
-    except Exception as e:
-        logger.error(f"Gemini MCP enhancement error: {e}")
-        return ""
 
 async def parse_document_gemini(file_path: str, file_extension: str) -> str:
     """Parse document using Gemini MCP"""
@@ -1609,11 +1606,22 @@ def stream_chat(
         yield history + [{"role": "assistant", "content": "Session initialization failed. Please refresh the page."}]
         return
     
-    chat_start_time = time.time()
+    session_start = time.time()
+    soft_timeout = 100
+    hard_timeout = 118  # stop slightly before HF max duration (120s)
+    
+    def elapsed():
+        return time.time() - session_start
     
     user_id = request.session_hash
     index_dir = f"./{user_id}_index"
     has_rag_index = os.path.exists(index_dir)
+    
+    supervisor_directives = None
+    supervisor_directives_text = ""
+    supervisor_user_note = ""
+    time_pressure_flag = False
+    time_pressure_message = ""
     
     # If agentic reasoning is disabled, skip all reasoning/planning and use MedSwin model alone
     if disable_agentic_reasoning:
@@ -1649,6 +1657,23 @@ def stream_chat(
         if execution_strategy["reasoning_override"]:
             reasoning_note = f"\n\n💡 *Autonomous Reasoning: {execution_strategy['rationale']}*"
         
+        supervisor_directives = gemini_supervisor_directives(
+            message,
+            reasoning,
+            plan,
+            elapsed(),
+            max_duration=120
+        )
+        supervisor_directives_text = format_supervisor_directives_text(supervisor_directives)
+        if supervisor_directives_text:
+            supervisor_user_note = f"🧭 Gemini Supervisor Tasks:\n{supervisor_directives_text}"
+        
+        if supervisor_directives.get("fast_track"):
+            logger.info("⚡ Supervisor requested fast-track execution to respect time budget.")
+            final_use_web_search = False  # Skip optional web search when supervisor requests fast track
+            reasoning_note += "\n\n⚡ *Supervisor: Fast-track requested due to limited time. Prioritize concise synthesis.*"
+        
+        
         # Detect language and translate if needed (Step 1 of plan)
         original_lang = detect_language(message)
         original_message = message
@@ -1675,58 +1700,77 @@ def stream_chat(
     if not disable_agentic_reasoning and reasoning and reasoning.get("complexity") in ["complex", "multi_faceted"]:
         base_system_prompt += f"\n\nQuery Analysis: This is a {reasoning['complexity']} {reasoning['query_type']} query. Address all sub-questions: {', '.join(reasoning.get('sub_questions', [])[:3])}"
     
+    if supervisor_directives_text:
+        base_system_prompt += (
+            f"\n\nGemini Supervisor Directives:\n{supervisor_directives_text}\n"
+            "Execute the tasks one-by-one, keeping each section within the suggested token budget. "
+            "If time becomes tight, summarize remaining insights immediately."
+        )
+    
     # ===== EXECUTION: RAG Retrieval (Step 2) =====
     rag_context = ""
     source_info = ""
     if final_use_rag and has_rag_index:
-        embed_model = HuggingFaceEmbedding(model_name=EMBEDDING_MODEL, token=HF_TOKEN)
-        Settings.embed_model = embed_model
-        storage_context = StorageContext.from_defaults(persist_dir=index_dir)
-        index = load_index_from_storage(storage_context, settings=Settings)
-        base_retriever = index.as_retriever(similarity_top_k=retriever_k)
-        auto_merging_retriever = AutoMergingRetriever(
-            base_retriever,
-            storage_context=storage_context,
-            simple_ratio_thresh=merge_threshold, 
-            verbose=True
-        )
-        logger.info(f"Query: {message}")
-        retrieval_start = time.time()
-        merged_nodes = auto_merging_retriever.retrieve(message)
-        logger.info(f"Retrieved {len(merged_nodes)} merged nodes in {time.time() - retrieval_start:.2f}s")
-        merged_file_sources = {}
-        for node in merged_nodes:
-            if hasattr(node.node, 'metadata') and 'file_name' in node.node.metadata:
-                file_name = node.node.metadata['file_name']
-                if file_name not in merged_file_sources:
-                    merged_file_sources[file_name] = 0
-                merged_file_sources[file_name] += 1
-        logger.info(f"Merged retrieval file distribution: {merged_file_sources}")
-        rag_context = "\n\n".join([n.node.text for n in merged_nodes])
-        if merged_file_sources:
-            source_info = "\n\nRetrieved information from files: " + ", ".join(merged_file_sources.keys())
+        if elapsed() >= soft_timeout - 10:
+            logger.warning("⏱️ Skipping RAG retrieval due to time pressure.")
+            time_pressure_flag = True
+            time_pressure_message = "Skipped some retrieval steps to finish within the time limit."
+            final_use_rag = False
+        else:
+            embed_model = HuggingFaceEmbedding(model_name=EMBEDDING_MODEL, token=HF_TOKEN)
+            Settings.embed_model = embed_model
+            storage_context = StorageContext.from_defaults(persist_dir=index_dir)
+            index = load_index_from_storage(storage_context, settings=Settings)
+            base_retriever = index.as_retriever(similarity_top_k=retriever_k)
+            auto_merging_retriever = AutoMergingRetriever(
+                base_retriever,
+                storage_context=storage_context,
+                simple_ratio_thresh=merge_threshold, 
+                verbose=True
+            )
+            logger.info(f"Query: {message}")
+            retrieval_start = time.time()
+            merged_nodes = auto_merging_retriever.retrieve(message)
+            logger.info(f"Retrieved {len(merged_nodes)} merged nodes in {time.time() - retrieval_start:.2f}s")
+            merged_file_sources = {}
+            for node in merged_nodes:
+                if hasattr(node.node, 'metadata') and 'file_name' in node.node.metadata:
+                    file_name = node.node.metadata['file_name']
+                    if file_name not in merged_file_sources:
+                        merged_file_sources[file_name] = 0
+                    merged_file_sources[file_name] += 1
+            logger.info(f"Merged retrieval file distribution: {merged_file_sources}")
+            rag_context = "\n\n".join([n.node.text for n in merged_nodes])
+            if merged_file_sources:
+                source_info = "\n\nRetrieved information from files: " + ", ".join(merged_file_sources.keys())
     
     # ===== EXECUTION: Web Search (Step 3) =====
     web_context = ""
     web_sources = []
     web_urls = []  # Store URLs for citations
     if final_use_web_search:
-        logger.info("🌐 Performing web search (will use Gemini MCP for summarization)...")
-        web_results = search_web(message, max_results=5)
-        if web_results:
-            logger.info(f"📊 Found {len(web_results)} web search results, now summarizing with Gemini MCP...")
-            web_summary = summarize_web_content(web_results, message)
-            if web_summary and len(web_summary) > 50:  # Check if we got a real summary
-                web_context = f"\n\nAdditional Web Sources (summarized with Gemini MCP):\n{web_summary}"
-            else:
-                # Fallback: use first result's content
-                web_context = f"\n\nAdditional Web Sources:\n{web_results[0].get('content', '')[:500]}"
-            web_sources = [r['title'] for r in web_results[:3]]
-            # Extract unique URLs for citations
-            web_urls = [r.get('url', '') for r in web_results if r.get('url')]
-            logger.info(f"✅ Web search completed: {len(web_results)} results, summarized with Gemini MCP")
+        if elapsed() >= soft_timeout - 5:
+            logger.warning("⏱️ Skipping web search to stay within execution window.")
+            time_pressure_flag = True
+            time_pressure_message = "Web search skipped due to time constraints."
+            final_use_web_search = False
         else:
-            logger.warning("⚠️ Web search returned no results")
+            logger.info("🌐 Performing web search (will use Gemini MCP for summarization)...")
+            web_results = search_web(message, max_results=5)
+            if web_results:
+                logger.info(f"📊 Found {len(web_results)} web search results, now summarizing with Gemini MCP...")
+                web_summary = summarize_web_content(web_results, message)
+                if web_summary and len(web_summary) > 50:  # Check if we got a real summary
+                    web_context = f"\n\nAdditional Web Sources (summarized with Gemini MCP):\n{web_summary}"
+                else:
+                    # Fallback: use first result's content
+                    web_context = f"\n\nAdditional Web Sources:\n{web_results[0].get('content', '')[:500]}"
+                web_sources = [r['title'] for r in web_results[:3]]
+                # Extract unique URLs for citations
+                web_urls = [r.get('url', '') for r in web_results if r.get('url')]
+                logger.info(f"✅ Web search completed: {len(web_results)} results, summarized with Gemini MCP")
+            else:
+                logger.warning("⚠️ Web search returned no results")
     
     # Build final context
     context_parts = []
@@ -1811,6 +1855,20 @@ def stream_chat(
         MedicalStoppingCriteria(eos_token_id, prompt_length, min_new_tokens=100)
     ])
     
+    def monitor_timeout():
+        nonlocal time_pressure_flag, time_pressure_message
+        while not stop_event.is_set():
+            current_elapsed = elapsed()
+            if current_elapsed >= hard_timeout:
+                logger.warning("⏳ Hard timeout reached – stopping generation thread.")
+                if not time_pressure_flag:
+                    time_pressure_flag = True
+                    if not time_pressure_message:
+                        time_pressure_message = "Stopped early to respect the 120s execution window."
+                stop_event.set()
+                break
+            time.sleep(0.5)
+    
     streamer = TextIteratorStreamer(
         medical_tokenizer,
         skip_prompt=True,
@@ -1838,6 +1896,8 @@ def stream_chat(
     
     thread = threading.Thread(target=medical_model_obj.generate, kwargs=generation_kwargs)
     thread.start()
+    timeout_thread = threading.Thread(target=monitor_timeout, daemon=True)
+    timeout_thread.start()
     
     updated_history = history + [
         {"role": "user", "content": original_message},
@@ -1846,70 +1906,42 @@ def stream_chat(
     yield updated_history
     
     partial_response = ""
-    reflection_data = None
-    reflection_note = ""
-    enhancement_note = ""
     try:
         for new_text in streamer:
             partial_response += new_text
             updated_history[-1]["content"] = partial_response
             yield updated_history
+            
+            if not time_pressure_flag and elapsed() >= soft_timeout:
+                logger.warning("⏱️ Soft timeout reached – finalizing response.")
+                time_pressure_flag = True
+                if not time_pressure_message:
+                    time_pressure_message = "Soft timeout reached. Delivering final answer early."
+                stop_event.set()
+                break
         
         # ===== SELF-REFLECTION (Step 6) =====
         if not disable_agentic_reasoning and reasoning and reasoning.get("complexity") in ["complex", "multi_faceted"]:
             logger.info("🔍 Performing self-reflection on answer quality...")
-            reflection_data = self_reflection(partial_response, message, reasoning)
+            reflection = self_reflection(partial_response, message, reasoning)
             
-            if reflection_data and (reflection_data.get("overall_score", 10) < 7 or reflection_data.get("improvement_suggestions")):
-                reflection_note = f"\n\n---\n**Self-Reflection** (Score: {reflection_data.get('overall_score', 'N/A')}/10)"
-                if reflection_data.get("improvement_suggestions"):
-                    reflection_note += f"\n💡 Suggestions: {', '.join(reflection_data['improvement_suggestions'][:2])}"
+            # Add reflection note if score is low or improvements suggested
+            if reflection.get("overall_score", 10) < 7 or reflection.get("improvement_suggestions"):
+                reflection_note = f"\n\n---\n**Self-Reflection** (Score: {reflection.get('overall_score', 'N/A')}/10)"
+                if reflection.get("improvement_suggestions"):
+                    reflection_note += f"\n💡 Suggestions: {', '.join(reflection['improvement_suggestions'][:2])}"
+                partial_response += reflection_note
+                updated_history[-1]["content"] = partial_response
         
         # Add reasoning note if autonomous override occurred
-        base_response = partial_response
-        
-        remaining_time = 120 - (time.time() - chat_start_time)
-        should_enhance = (
-            not disable_agentic_reasoning and 
-            (
-                final_use_rag or 
-                final_use_web_search or 
-                (reasoning is not None)
-            )
-        )
-        if remaining_time <= 15:
-            logger.warning("⏱️ Skipping Gemini enhancement to stay within max duration.")
-            should_enhance = False
-        
-        if should_enhance:
-            logger.info("🧠 Launching Gemini MCP response enhancer for extended answer...")
-            enhanced_text = enhance_answer_with_gemini(
-                query=message,
-                initial_answer=base_response,
-                rag_context=rag_context,
-                web_context=web_context,
-                reasoning=reasoning,
-                reflection=reflection_data
-            )
-            if enhanced_text:
-                partial_response = enhanced_text
-                enhancement_note = "\n\n_Gemini MCP multi-step reasoning enhancer applied._"
-                
-                if reflection_data:
-                    partial_response += f"\n\n_Self-reflection score: {reflection_data.get('overall_score', 'N/A')}/10._"
-            else:
-                if reflection_note:
-                    partial_response = base_response + reflection_note
-                else:
-                    partial_response = base_response
-        else:
-            partial_response = base_response + reflection_note if reflection_note else base_response
-        
+        header_sections = []
+        if supervisor_user_note:
+            header_sections.append(supervisor_user_note)
         if reasoning_note:
-            partial_response = reasoning_note + "\n\n" + partial_response
-        
-        if enhancement_note:
-            partial_response += enhancement_note
+            header_sections.append(reasoning_note)
+        if header_sections:
+            partial_response = "\n\n".join(header_sections) + "\n\n" + partial_response
+            updated_history[-1]["content"] = partial_response
         
         # Translate back if needed
         if needs_translation and partial_response:
@@ -1932,11 +1964,15 @@ def stream_chat(
             if citation_links:
                 citations_text = "\n\n**Sources:** " + ", ".join(citation_links)
         
+        if time_pressure_flag and time_pressure_message:
+            partial_response += f"\n\n⏱️ {time_pressure_message}"
+        
         # Add speaker icon and citations to assistant message
         speaker_icon = ' 🔊'
         partial_response_with_speaker = partial_response + citations_text + speaker_icon
         updated_history[-1]["content"] = partial_response_with_speaker
         
+        stop_event.set()  # Ensure timeout monitor thread exits once response is finalized
         yield updated_history
             
     except GeneratorExit:
