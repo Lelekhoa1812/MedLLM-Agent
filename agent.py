@@ -215,8 +215,8 @@ async def call_tool(name: str, arguments: dict) -> Sequence[TextContent | ImageC
             
             # Generate content using Gemini API
             try:
-                # Get the model instance
-                gemini_model = gemini_client.models.get(model)
+                # Get the model instance (requires keyword argument)
+                gemini_model = gemini_client.models.get(model=model)
                 
                 # Prepare generation config
                 generation_config = {

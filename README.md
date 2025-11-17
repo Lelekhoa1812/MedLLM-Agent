@@ -63,6 +63,7 @@ tags:
 - Increased max tokens to prevent early stopping
 - Custom EOS handling for medical models
 - Dynamic system prompts based on RAG status
+- One-click agentic toggle to run MedSwin alone (no RAG/web search) for deterministic, offline-safe answers
 
 ## 🚀 Usage
 
@@ -71,6 +72,7 @@ tags:
    - Enable/disable Document RAG
    - Enable/disable Web Search (MCP)
    - Select medical model (MedSwin SFT/KD/TA)
+   - Toggle agentic reasoning on/off for MedSwin-only responses
 3. **Ask Questions**: Type your medical question in any language
 4. **Get Answers**: Receive comprehensive answers based on:
    - Your uploaded documents (if RAG enabled)
@@ -100,6 +102,14 @@ See `requirements.txt` for full dependency list. Key dependencies:
 - **RAG Framework**: `llama-index`, `llama_index.llms.huggingface`, `llama_index.embeddings.huggingface`
 - **Utilities**: `langdetect`, `gradio`, `spaces`, `soundfile`
 - **TTS**: Optional - `TTS` package (voice features work with MCP fallback if unavailable)
+
+### 🔑 Access Tokens
+
+- **Hugging Face**: Set `HF_TOKEN` so Transformers can download the MedSwin checkpoints. Generate a read-only token at [huggingface.co/settings/tokens](https://huggingface.co/settings/tokens) and export it:
+  ```bash
+  export HF_TOKEN="hf_your_token"
+  ```
+- **Gemini**: `GEMINI_API_KEY` remains required for MCP translation, parsing, transcription, and summarization (see MCP configuration below).
 
 ### 🔌 MCP Configuration
 
