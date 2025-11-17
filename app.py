@@ -200,18 +200,18 @@ global_mcp_session = None
 global_mcp_stdio_ctx = None  # Store stdio context to keep it alive
 global_mcp_lock = threading.Lock()  # Lock for thread-safe session access
 # MCP server configuration via environment variables
-# Gemini MCP server: Python-based server (gemini_mcp.py)
+# Gemini MCP server: Python-based server (agent.py)
 # This works on Hugging Face Spaces without requiring npm/Node.js
 # Make sure GEMINI_API_KEY is set in environment variables
 # 
-# Default configuration uses the bundled gemini_mcp.py script
+# Default configuration uses the bundled agent.py script
 # To override:
 #   export MCP_SERVER_COMMAND="python"
-#   export MCP_SERVER_ARGS="/path/to/gemini_mcp.py"
+#   export MCP_SERVER_ARGS="/path/to/agent.py"
 script_dir = os.path.dirname(os.path.abspath(__file__))
-gemini_mcp_path = os.path.join(script_dir, "gemini_mcp.py")
+agent_path = os.path.join(script_dir, "agent.py")
 MCP_SERVER_COMMAND = os.environ.get("MCP_SERVER_COMMAND", "python")
-MCP_SERVER_ARGS = os.environ.get("MCP_SERVER_ARGS", gemini_mcp_path).split() if os.environ.get("MCP_SERVER_ARGS") else [gemini_mcp_path]
+MCP_SERVER_ARGS = os.environ.get("MCP_SERVER_ARGS", agent_path).split() if os.environ.get("MCP_SERVER_ARGS") else [agent_path]
 
 async def get_mcp_session():
     """Get or create MCP client session with proper context management"""
@@ -277,16 +277,25 @@ async def get_mcp_session():
         session = ClientSession(read, write)
         await session.__aenter__()
         
-        # Wait a bit for the server to fully initialize
-        await asyncio.sleep(0.5)
+        # Wait longer for the server to fully initialize
+        # The server needs time to start up and be ready
+        await asyncio.sleep(1.0)
         
-        # Verify the session works by listing tools
-        try:
-            tools = await session.list_tools()
-            logger.info(f"MCP server initialized with {len(tools.tools)} tools")
-        except Exception as e:
-            logger.warning(f"Could not list tools immediately after session creation: {e}")
-            # Continue anyway, might work on first actual call
+        # Verify the session works by listing tools with retries
+        max_init_retries = 5
+        for init_attempt in range(max_init_retries):
+            try:
+                tools = await session.list_tools()
+                if tools and hasattr(tools, 'tools'):
+                    logger.info(f"MCP server initialized with {len(tools.tools)} tools: {[t.name for t in tools.tools]}")
+                    break
+            except Exception as e:
+                if init_attempt < max_init_retries - 1:
+                    logger.debug(f"Initialization attempt {init_attempt + 1}/{max_init_retries} failed, retrying...")
+                    await asyncio.sleep(0.5 * (init_attempt + 1))
+                else:
+                    logger.warning(f"Could not list tools after {max_init_retries} attempts: {e}")
+                    # Continue anyway, might work on first actual call
         
         # Store both the session and stdio context to keep them alive
         global_mcp_session = session
@@ -301,7 +310,7 @@ async def get_mcp_session():
         global_mcp_stdio_ctx = None
         return None
 
-async def call_gemini_mcp(user_prompt: str, system_prompt: str = None, files: list = None, model: str = None, temperature: float = 0.2) -> str:
+async def call_agent(user_prompt: str, system_prompt: str = None, files: list = None, model: str = None, temperature: float = 0.2) -> str:
     """Call Gemini MCP generate_content tool"""
     if not MCP_AVAILABLE:
         logger.warning("MCP not available for Gemini call")
@@ -428,7 +437,7 @@ async def transcribe_audio_gemini(audio_path: str) -> str:
         system_prompt = "You are a professional transcription service. Provide accurate, well-formatted transcripts."
         user_prompt = "Please transcribe this audio file. Include speaker identification if multiple speakers are present, and format it with proper punctuation and paragraphs, remove mumble, ignore non-verbal noises."
         
-        result = await call_gemini_mcp(
+        result = await call_agent(
             user_prompt=user_prompt,
             system_prompt=system_prompt,
             files=files,
@@ -651,7 +660,7 @@ async def translate_text_gemini(text: str, target_lang: str = "en", source_lang:
     # Use concise system prompt
     system_prompt = "You are a professional translator. Translate accurately and concisely."
     
-    result = await call_gemini_mcp(
+    result = await call_agent(
         user_prompt=user_prompt,
         system_prompt=system_prompt,
         model=GEMINI_MODEL_LITE,  # Use lite model for translation
@@ -688,94 +697,107 @@ def translate_text(text: str, target_lang: str = "en", source_lang: str = None) 
     # Return original text if translation fails
     return text
 
-async def search_web_gemini(query: str, max_results: int = 5) -> list:
-    """Search web using Gemini MCP generate_content tool"""
+async def search_web_mcp_tool(query: str, max_results: int = 5) -> list:
+    """Search web using MCP web search tool (e.g., DuckDuckGo MCP server)"""
     if not MCP_AVAILABLE:
-        logger.warning("Gemini MCP not available for web search")
         return []
     
     try:
-        # Use Gemini MCP to search the web and get structured results
-        user_prompt = f"""Search the web for: "{query}"
-
-Return the search results in JSON format with the following structure:
-{{
-    "results": [
-        {{
-            "title": "Result title",
-            "url": "Result URL",
-            "content": "Brief summary or snippet of the content"
-        }}
-    ]
-}}
-
-Return up to {max_results} most relevant results. Focus on medical/health information if applicable."""
-        
-        # Use concise system prompt
-        system_prompt = "You are a web search assistant. Search the web and return structured JSON results with titles, URLs, and content summaries."
-        
-        result = await call_gemini_mcp(
-            user_prompt=user_prompt,
-            system_prompt=system_prompt,
-            model=GEMINI_MODEL,  # Use full model for web search
-            temperature=0.3
-        )
-        
-        if not result:
-            logger.warning("Gemini MCP returned empty search results")
+        session = await get_mcp_session()
+        if session is None:
             return []
         
-        # Parse JSON response
-        try:
-            # Extract JSON from response
-            json_start = result.find('{')
-            json_end = result.rfind('}') + 1
-            if json_start >= 0 and json_end > json_start:
-                data = json.loads(result[json_start:json_end])
-                if isinstance(data, dict) and "results" in data:
-                    web_content = []
-                    for entry in data["results"][:max_results]:
-                        web_content.append({
-                            'title': entry.get('title', ''),
-                            'url': entry.get('url', ''),
-                            'content': entry.get('content', '')
-                        })
-                    logger.info(f"Gemini MCP search returned {len(web_content)} results")
+        # Retry listing tools if it fails the first time
+        max_retries = 3
+        tools = None
+        for attempt in range(max_retries):
+            try:
+                tools = await session.list_tools()
+                break
+            except Exception as e:
+                if attempt < max_retries - 1:
+                    await asyncio.sleep(0.5 * (attempt + 1))
+                else:
+                    logger.error(f"Failed to list MCP tools after {max_retries} attempts: {e}")
+                    return []
+        
+        if not tools or not hasattr(tools, 'tools'):
+            return []
+        
+        # Look for web search tools (DuckDuckGo, search, etc.)
+        search_tool = None
+        for tool in tools.tools:
+            tool_name_lower = tool.name.lower()
+            if any(keyword in tool_name_lower for keyword in ["search", "duckduckgo", "ddg", "web"]):
+                search_tool = tool
+                logger.info(f"Found web search MCP tool: {tool.name}")
+                break
+        
+        if search_tool:
+            try:
+                # Call the search tool
+                result = await session.call_tool(
+                    search_tool.name,
+                    arguments={"query": query, "max_results": max_results}
+                )
+                
+                # Parse result
+                web_content = []
+                if hasattr(result, 'content') and result.content:
+                    for item in result.content:
+                        if hasattr(item, 'text'):
+                            try:
+                                data = json.loads(item.text)
+                                if isinstance(data, list):
+                                    for entry in data[:max_results]:
+                                        web_content.append({
+                                            'title': entry.get('title', ''),
+                                            'url': entry.get('url', entry.get('href', '')),
+                                            'content': entry.get('body', entry.get('snippet', entry.get('content', '')))
+                                        })
+                                elif isinstance(data, dict):
+                                    if 'results' in data:
+                                        for entry in data['results'][:max_results]:
+                                            web_content.append({
+                                                'title': entry.get('title', ''),
+                                                'url': entry.get('url', entry.get('href', '')),
+                                                'content': entry.get('body', entry.get('snippet', entry.get('content', '')))
+                                            })
+                                    else:
+                                        web_content.append({
+                                            'title': data.get('title', ''),
+                                            'url': data.get('url', data.get('href', '')),
+                                            'content': data.get('body', data.get('snippet', data.get('content', '')))
+                                        })
+                            except json.JSONDecodeError:
+                                # If not JSON, treat as plain text
+                                web_content.append({
+                                    'title': '',
+                                    'url': '',
+                                    'content': item.text[:1000]
+                                })
+                
+                if web_content:
+                    logger.info(f"Web search MCP returned {len(web_content)} results")
                     return web_content
-                elif isinstance(data, list):
-                    # Handle case where results are directly in a list
-                    web_content = []
-                    for entry in data[:max_results]:
-                        web_content.append({
-                            'title': entry.get('title', ''),
-                            'url': entry.get('url', entry.get('href', '')),
-                            'content': entry.get('content', entry.get('body', entry.get('snippet', '')))
-                        })
-                    logger.info(f"Gemini MCP search returned {len(web_content)} results")
-                    return web_content
-        except json.JSONDecodeError as e:
-            logger.warning(f"Failed to parse Gemini search results as JSON: {e}")
-            # Fallback: treat as plain text result
-            return [{
-                'title': 'Web Search Result',
-                'url': '',
-                'content': result[:1000]  # Limit content length
-            }]
+            except Exception as e:
+                logger.error(f"Error calling web search MCP tool: {e}")
         
         return []
     except Exception as e:
-        logger.error(f"Gemini MCP web search error: {e}")
-        import traceback
-        logger.debug(traceback.format_exc())
+        logger.error(f"Web search MCP tool error: {e}")
         return []
 
 async def search_web_mcp(query: str, max_results: int = 5) -> list:
-    """Search web using Gemini MCP (wrapper for compatibility)"""
-    results = await search_web_gemini(query, max_results)
+    """Search web using MCP tools - tries web search MCP tool first, then falls back to direct search"""
+    # First try to use a dedicated web search MCP tool (like DuckDuckGo MCP server)
+    results = await search_web_mcp_tool(query, max_results)
     if results:
         return results
-    # Fallback to direct search only if Gemini MCP fails
-    logger.warning("Gemini MCP web search failed, falling back to direct search")
+    
+    # If no web search MCP tool available, use direct search (ddgs)
+    # This is the correct approach - Gemini MCP cannot search the web
+    logger.info("No web search MCP tool found, using direct DuckDuckGo search")
     return search_web_fallback(query, max_results)
 
 def search_web_fallback(query: str, max_results: int = 5) -> list:
@@ -893,7 +915,7 @@ Summary:"""
     # Use concise system prompt
     system_prompt = "You are a medical information summarizer. Extract and summarize key medical facts accurately."
     
-    result = await call_gemini_mcp(
+    result = await call_agent(
         user_prompt=user_prompt,
         system_prompt=system_prompt,
         model=GEMINI_MODEL,  # Use full model for summarization
@@ -978,7 +1000,7 @@ Respond in JSON format:
     # Use concise system prompt
     system_prompt = "You are a medical reasoning system. Analyze queries systematically and provide structured JSON responses."
     
-    response = await call_gemini_mcp(
+    response = await call_agent(
         user_prompt=reasoning_prompt,
         system_prompt=system_prompt,
         model=GEMINI_MODEL,  # Use full model for reasoning
@@ -1171,7 +1193,7 @@ Respond in JSON:
     # Use concise system prompt
     system_prompt = "You are a medical answer quality evaluator. Provide honest, constructive feedback."
     
-    response = await call_gemini_mcp(
+    response = await call_agent(
         user_prompt=reflection_prompt,
         system_prompt=system_prompt,
         model=GEMINI_MODEL,  # Use full model for reflection
@@ -1248,7 +1270,7 @@ async def parse_document_gemini(file_path: str, file_extension: str) -> str:
         system_prompt = "Extract all text content from the document accurately."
         user_prompt = "Extract all text content from this document. Return only the extracted text, preserving structure and formatting where possible."
         
-        result = await call_gemini_mcp(
+        result = await call_agent(
             user_prompt=user_prompt,
             system_prompt=system_prompt,
             files=files,
@@ -1537,15 +1559,16 @@ def stream_chat(
     web_sources = []
     web_urls = []  # Store URLs for citations
     if final_use_web_search:
-        logger.info("🌐 Performing web search (MCP)...")
+        logger.info("🌐 Performing web search (MCP or direct ddgs)...")
         web_results = search_web(message, max_results=5)
         if web_results:
+            logger.info(f"📊 Summarizing {len(web_results)} web search results using Gemini MCP...")
             web_summary = summarize_web_content(web_results, message)
-            web_context = f"\n\nAdditional Web Sources (MCP):\n{web_summary}"
+            web_context = f"\n\nAdditional Web Sources:\n{web_summary}"
             web_sources = [r['title'] for r in web_results[:3]]
             # Extract unique URLs for citations
             web_urls = [r.get('url', '') for r in web_results if r.get('url')]
-            logger.info(f"Web search completed, found {len(web_results)} results")
+            logger.info(f"Web search completed, found {len(web_results)} results, summarized with Gemini MCP")
     
     # Build final context
     context_parts = []

@@ -176,20 +176,38 @@ async def call_tool(name: str, arguments: dict) -> Sequence[TextContent | ImageC
             if system_prompt:
                 contents = f"{system_prompt}\n\n{user_prompt}"
             
-            # Note: The simple API doesn't support files or temperature directly
-            # For files, we would need to use a different approach or encode them
-            # For now, we'll handle text-only requests
-            if files:
-                logger.warning("File support not available in simple API mode. Processing text only.")
-                # Could potentially encode files as base64 in the prompt, but keeping it simple for now
+            # Prepare content for Gemini API
+            # The google-genai API expects contents as a list of parts
+            gemini_contents = []
             
-            # Generate content using the simple API
+            # Add text content as first part
+            gemini_contents.append(contents)
+            
+            # Add file content if provided
+            if files:
+                try:
+                    file_parts = prepare_gemini_files(files)
+                    # Convert file parts to the format expected by Gemini API
+                    for file_part in file_parts:
+                        # The API expects parts with inline_data for binary content
+                        gemini_contents.append({
+                            "inline_data": {
+                                "mime_type": file_part["mime_type"],
+                                "data": base64.b64encode(file_part["data"]).decode('utf-8')
+                            }
+                        })
+                    logger.info(f"Added {len(file_parts)} file(s) to Gemini request")
+                except Exception as e:
+                    logger.warning(f"Error preparing files: {e}, continuing with text only")
+            
+            # Generate content using Gemini API
             try:
                 # Use asyncio.to_thread to make the blocking call async
+                # The API accepts contents as a list
                 response = await asyncio.to_thread(
                     gemini_client.models.generate_content,
                     model=model,
-                    contents=contents
+                    contents=gemini_contents
                 )
                 
                 # Extract text from response
