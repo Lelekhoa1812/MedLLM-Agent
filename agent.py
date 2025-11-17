@@ -32,16 +32,14 @@ except ImportError:
     sys.exit(1)
 
 # Configure logging
-# Use DEBUG level to see all MCP protocol messages
-logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-# Enable detailed logging for MCP protocol debugging
-# We want to see what requests the server receives
+# Set MCP logging to WARNING to reduce noise
 mcp_logger = logging.getLogger("mcp")
-mcp_logger.setLevel(logging.DEBUG)  # Show all MCP protocol messages for debugging
+mcp_logger.setLevel(logging.WARNING)
 root_logger = logging.getLogger("root")
-root_logger.setLevel(logging.INFO)  # Show info level for root logger
+root_logger.setLevel(logging.INFO)
 
 # Initialize Gemini
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
@@ -121,8 +119,6 @@ def prepare_gemini_files(files: list) -> list:
 @app.list_tools()
 async def list_tools() -> list[Tool]:
     """List available tools"""
-    logger.info("📋 MCP server received list_tools request")
-    logger.debug("list_tools() called - preparing tool list")
     try:
         tools = [
             Tool(
@@ -164,13 +160,9 @@ async def list_tools() -> list[Tool]:
                 }
             )
         ]
-        logger.info(f"✅ MCP server returning {len(tools)} tools: {[t.name for t in tools]}")
-        logger.debug(f"Tool details: {tools[0].name} - {tools[0].description[:50]}...")
         return tools
     except Exception as e:
-        logger.error(f"❌ Error in list_tools(): {e}")
-        import traceback
-        logger.debug(f"list_tools error traceback:\n{traceback.format_exc()}")
+        logger.error(f"Error in list_tools(): {e}")
         raise
 
 @app.call_tool()
@@ -243,7 +235,6 @@ async def call_tool(name: str, arguments: dict) -> Sequence[TextContent | ImageC
                 
                 # Extract text from response
                 if response and hasattr(response, 'text') and response.text:
-                    logger.info(f"✅ Gemini generated content successfully ({len(response.text)} chars)")
                     return [TextContent(type="text", text=response.text)]
                 elif response and hasattr(response, 'candidates') and response.candidates:
                     # Try to extract text from candidates if response is a list of candidates
@@ -255,7 +246,6 @@ async def call_tool(name: str, arguments: dict) -> Sequence[TextContent | ImageC
                                     text_parts.append(part.text)
                     if text_parts:
                         text = ''.join(text_parts)
-                        logger.info(f"✅ Gemini generated content successfully ({len(text)} chars)")
                         return [TextContent(type="text", text=text)]
                     else:
                         logger.warning("Gemini returned response but no text found")
@@ -266,14 +256,10 @@ async def call_tool(name: str, arguments: dict) -> Sequence[TextContent | ImageC
                     
             except Exception as e:
                 logger.error(f"Error generating content: {e}")
-                import traceback
-                logger.debug(traceback.format_exc())
                 return [TextContent(type="text", text=f"Error: {str(e)}")]
                 
         except Exception as e:
             logger.error(f"Error in generate_content: {e}")
-            import traceback
-            logger.debug(traceback.format_exc())
             return [TextContent(type="text", text=f"Error: {str(e)}")]
     else:
         return [TextContent(type="text", text=f"Unknown tool: {name}")]
@@ -295,15 +281,10 @@ async def main():
     logging.getLogger("root").setLevel(logging.INFO)
     
     try:
-        logger.info("🔄 Setting up stdio_server...")
         async with stdio_server() as streams:
-            logger.info("✅ MCP server stdio streams ready")
-            logger.debug(f"Streams: read={type(streams[0])}, write={type(streams[1])}")
-            
             # Create initialization options
             # The Server class will automatically provide its capabilities based on
             # the registered @app.list_tools() and @app.call_tool() handlers
-            logger.debug("Preparing server capabilities...")
             try:
                 # Try to get capabilities from the server if the method exists
                 if hasattr(app, 'get_capabilities'):
@@ -314,42 +295,29 @@ async def main():
                             notification_options=NotificationOptions(),
                             experimental_capabilities={}
                         )
-                        logger.debug(f"Got capabilities with NotificationOptions: {server_capabilities}")
-                    except (ImportError, AttributeError, TypeError) as e:
-                        logger.debug(f"NotificationOptions not available: {e}, trying without...")
+                    except (ImportError, AttributeError, TypeError):
                         # Fallback: try without NotificationOptions
                         try:
                             server_capabilities = app.get_capabilities()
-                            logger.debug(f"Got capabilities: {server_capabilities}")
-                        except Exception as e2:
-                            logger.debug(f"get_capabilities() failed: {e2}, using empty dict")
+                        except Exception:
                             # If get_capabilities doesn't work, create minimal capabilities
                             server_capabilities = {}
                 else:
-                    logger.debug("Server doesn't have get_capabilities method, using empty dict")
                     # Server will provide capabilities automatically, use empty dict
                     server_capabilities = {}
-            except Exception as e:
-                logger.warning(f"Could not get server capabilities: {e}, server will provide defaults")
-                import traceback
-                logger.debug(f"Capabilities error traceback:\n{traceback.format_exc()}")
+            except Exception:
                 # Server will handle capabilities automatically
                 server_capabilities = {}
             
             # Create initialization options
-            # The server_name and server_version are required
-            # Capabilities will be automatically determined by the Server from registered handlers
-            logger.info("📋 Creating initialization options...")
             init_options = InitializationOptions(
                 server_name="gemini-mcp-server",
                 server_version="1.0.0",
                 capabilities=server_capabilities
             )
-            logger.debug(f"Initialization options: {init_options}")
             
             # Run the server with initialization options
-            logger.info("🚀 Starting MCP server run loop...")
-            logger.info("   Server is ready to accept requests")
+            logger.info("MCP server ready")
             try:
                 await app.run(
                     read_stream=streams[0],
@@ -357,15 +325,11 @@ async def main():
                     initialization_options=init_options
                 )
             except Exception as run_error:
-                logger.error(f"❌ Error in app.run(): {run_error}")
-                import traceback
-                logger.debug(f"app.run() error traceback:\n{traceback.format_exc()}")
+                logger.error(f"Error in app.run(): {run_error}")
                 raise
     except Exception as e:
         logging.getLogger("root").setLevel(original_root_level)
-        logger.error(f"❌ MCP server fatal error: {type(e).__name__}: {e}")
-        import traceback
-        logger.debug(f"Server error traceback:\n{traceback.format_exc()}")
+        logger.error(f"MCP server fatal error: {type(e).__name__}: {e}")
         raise
 
 if __name__ == "__main__":

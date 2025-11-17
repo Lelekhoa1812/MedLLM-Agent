@@ -34,13 +34,12 @@ from llama_index.embeddings.huggingface import HuggingFaceEmbedding
 from tqdm import tqdm
 from langdetect import detect, LangDetectException
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
-# Enable DEBUG logging for MCP troubleshooting
-# Set to logging.INFO in production for less verbose output
-logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+# Set logging to INFO level for cleaner output
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
-# Enable MCP client debugging
+# Set MCP client logging to WARNING to reduce noise
 mcp_client_logger = logging.getLogger("mcp.client")
-mcp_client_logger.setLevel(logging.DEBUG)
+mcp_client_logger.setLevel(logging.WARNING)
 hf_logging.set_verbosity_error()
 
 # MCP imports
@@ -53,14 +52,6 @@ try:
         nest_asyncio.apply()  # Allow nested event loops
     except ImportError:
         pass  # nest_asyncio is optional
-    
-    # Check MCP SDK version for debugging
-    try:
-        import mcp
-        mcp_version = getattr(mcp, '__version__', 'unknown')
-        logger.debug(f"MCP SDK version: {mcp_version}")
-    except:
-        logger.debug("Could not determine MCP SDK version")
     
     MCP_AVAILABLE = True
 except ImportError as e:
@@ -238,29 +229,8 @@ async def get_mcp_session():
     
     # Check if session exists and is still valid
     if global_mcp_session is not None:
-        try:
-            # Test if session is still alive by listing tools
-            logger.debug("Testing existing MCP session...")
-            await global_mcp_session.list_tools()
-            logger.debug("Existing MCP session is valid")
-            return global_mcp_session
-        except Exception as e:
-            logger.warning(f"Existing MCP session invalid, recreating: {e}")
-            import traceback
-            logger.debug(f"Session validation error traceback: {traceback.format_exc()}")
-            # Clean up old session
-            try:
-                if global_mcp_session is not None:
-                    await global_mcp_session.__aexit__(None, None, None)
-            except Exception as cleanup_error:
-                logger.debug(f"Error cleaning up session: {cleanup_error}")
-            try:
-                if global_mcp_stdio_ctx is not None:
-                    await global_mcp_stdio_ctx.__aexit__(None, None, None)
-            except Exception as cleanup_error:
-                logger.debug(f"Error cleaning up stdio context: {cleanup_error}")
-            global_mcp_session = None
-            global_mcp_stdio_ctx = None
+        # Trust that existing session is valid - verify only when actually using it
+        return global_mcp_session
     
     # Create new session using correct MCP SDK pattern
     try:
@@ -268,14 +238,12 @@ async def get_mcp_session():
         mcp_env = os.environ.copy()
         if GEMINI_API_KEY:
             mcp_env["GEMINI_API_KEY"] = GEMINI_API_KEY
-            logger.debug("GEMINI_API_KEY set in MCP server environment")
         else:
             logger.warning("GEMINI_API_KEY not set in environment. Gemini MCP features may not work.")
         
         # Add other Gemini MCP configuration if set
         if os.environ.get("GEMINI_MODEL"):
             mcp_env["GEMINI_MODEL"] = os.environ.get("GEMINI_MODEL")
-            logger.debug(f"GEMINI_MODEL set to: {mcp_env['GEMINI_MODEL']}")
         if os.environ.get("GEMINI_TIMEOUT"):
             mcp_env["GEMINI_TIMEOUT"] = os.environ.get("GEMINI_TIMEOUT")
         if os.environ.get("GEMINI_MAX_OUTPUT_TOKENS"):
@@ -283,8 +251,7 @@ async def get_mcp_session():
         if os.environ.get("GEMINI_TEMPERATURE"):
             mcp_env["GEMINI_TEMPERATURE"] = os.environ.get("GEMINI_TEMPERATURE")
         
-        logger.info(f"Creating MCP client session with command: {MCP_SERVER_COMMAND} {MCP_SERVER_ARGS}")
-        logger.debug(f"MCP server args type: {type(MCP_SERVER_ARGS)}, value: {MCP_SERVER_ARGS}")
+        logger.info("Creating MCP client session...")
         
         server_params = StdioServerParameters(
             command=MCP_SERVER_COMMAND,
@@ -292,203 +259,37 @@ async def get_mcp_session():
             env=mcp_env
         )
         
-        logger.debug("Creating stdio_client context manager...")
         # Correct MCP SDK usage: stdio_client is an async context manager
         # that yields (read, write) streams
         stdio_ctx = stdio_client(server_params)
-        logger.debug("Entering stdio_client context...")
         read, write = await stdio_ctx.__aenter__()
-        logger.debug("✅ stdio_client context entered, streams obtained")
         
         # Wait for the server process to start and be ready
-        logger.info("⏳ Waiting for MCP server process to start...")
-        await asyncio.sleep(2.0)  # Initial wait for server startup
+        await asyncio.sleep(1.5)  # Wait for server startup
         
         # Create ClientSession from the streams
-        logger.debug("Creating ClientSession from streams...")
-        logger.debug(f"Read stream type: {type(read)}, Write stream type: {type(write)}")
-        
-        # Check if ClientSession has any required initialization parameters
-        try:
-            import inspect
-            session_init_sig = inspect.signature(ClientSession.__init__)
-            logger.debug(f"ClientSession.__init__ signature: {session_init_sig}")
-        except:
-            pass
-        
         session = ClientSession(read, write)
-        logger.debug(f"ClientSession object created: {type(session)}")
         
         # Initialize the session (this sends initialize request and waits for response + initialized notification)
-        logger.info("🔄 Initializing MCP session (sending initialize request)...")
-        logger.debug("About to call session.__aenter__() for initialization handshake...")
+        # The __aenter__() method handles the complete initialization handshake:
+        # 1. Sends initialize request with client info
+        # 2. Waits for initialize response from server
+        # 3. Waits for initialized notification from server (this is critical!)
+        # According to MCP protocol spec, the client MUST wait for the initialized notification
+        # before sending any other requests (like list_tools)
         try:
-            # The __aenter__() method handles the complete initialization handshake:
-            # 1. Sends initialize request with client info
-            # 2. Waits for initialize response from server
-            # 3. Waits for initialized notification from server (this is critical!)
-            # According to MCP protocol spec, the client MUST wait for the initialized notification
-            # before sending any other requests (like list_tools)
-            init_result = await session.__aenter__()
-            logger.info(f"✅ MCP session __aenter__() completed")
-            logger.debug(f"Initialization result: {init_result}")
-            if hasattr(init_result, '__dict__'):
-                logger.debug(f"Init result attributes: {init_result.__dict__}")
+            await session.__aenter__()
+            logger.info("✅ MCP session initialized")
+            
+            # After __aenter__() completes, wait a bit longer to ensure server's internal state is ready
+            # The server may have sent the initialized notification but needs time to set up handlers
+            await asyncio.sleep(1.0)  # Give server time to finalize internal state
         except Exception as e:
             error_msg = str(e)
             error_type = type(e).__name__
             logger.error(f"❌ MCP session initialization failed: {error_type}: {error_msg}")
-            import traceback
-            full_traceback = traceback.format_exc()
-            logger.debug(f"Initialization error traceback:\n{full_traceback}")
-            
-            # Try to get more details about the error
-            if hasattr(e, 'args') and e.args:
-                logger.debug(f"Error args: {e.args}")
-            if hasattr(e, '__dict__'):
-                logger.debug(f"Error dict: {e.__dict__}")
-            
-            # Check if this is a protocol error
-            if "invalid" in error_msg.lower() or "parameter" in error_msg.lower():
-                logger.error("⚠️ This appears to be a protocol-level error.")
-                logger.error("   Possible causes:")
-                logger.error("   1. Server not ready to receive initialize request")
-                logger.error("   2. Protocol version mismatch between client and server")
-                logger.error("   3. Malformed initialization request")
-                logger.error("   4. Server rejected initialization parameters")
             
             # Clean up and return None
-            try:
-                await stdio_ctx.__aexit__(None, None, None)
-            except Exception as cleanup_error:
-                logger.debug(f"Error during cleanup: {cleanup_error}")
-            return None
-        
-        # After __aenter__() completes, the session should be fully initialized
-        # However, there may be a race condition where the server has sent the
-        # initialized notification but hasn't finished setting up its internal state.
-        # We'll add a small initial delay and then verify by attempting to list tools with retries.
-        logger.debug("Waiting briefly for server to finalize initialization state...")
-        await asyncio.sleep(0.1)  # Small delay to let server finalize internal state
-        
-        # Verify the session works by listing tools with retries
-        # This handles any edge cases where the server needs additional time
-        logger.info("🔍 Verifying MCP session by listing tools...")
-        max_init_retries = 3
-        tools_listed = False
-        tools = None
-        last_error = None
-        
-        for init_attempt in range(max_init_retries):
-            try:
-                logger.debug(f"Attempting to list tools (attempt {init_attempt + 1}/{max_init_retries})...")
-                # Use a timeout to prevent hanging
-                tools = await asyncio.wait_for(session.list_tools(), timeout=10.0)
-                logger.debug(f"list_tools() returned: type={type(tools)}, value={tools}")
-                
-                if tools and hasattr(tools, 'tools') and len(tools.tools) > 0:
-                    tool_names = [t.name for t in tools.tools]
-                    logger.info(f"✅ MCP server ready with {len(tools.tools)} tools: {tool_names}")
-                    tools_listed = True
-                    break
-                else:
-                    logger.warning(f"list_tools() returned empty or invalid result: {tools}")
-                    if init_attempt < max_init_retries - 1:
-                        # Exponential backoff for empty results
-                        wait_time = 0.5 * (2 ** init_attempt)
-                        logger.debug(f"Empty result, waiting {wait_time:.2f}s before retry...")
-                        await asyncio.sleep(wait_time)
-                        continue
-            except asyncio.TimeoutError:
-                last_error = Exception("list_tools() timed out after 10 seconds")
-                logger.warning(f"⏱️ list_tools() timed out (attempt {init_attempt + 1}/{max_init_retries})")
-                if init_attempt < max_init_retries - 1:
-                    wait_time = 1.0 * (init_attempt + 1)
-                    await asyncio.sleep(wait_time)
-                    continue
-            except Exception as e:
-                last_error = e
-                error_str = str(e).lower()
-                error_msg = str(e)
-                error_type = type(e).__name__
-                
-                # Check error data for more details
-                error_data_msg = ""
-                if hasattr(e, '__dict__') and 'error' in e.__dict__:
-                    error_obj = e.__dict__.get('error')
-                    if hasattr(error_obj, 'message'):
-                        error_data_msg = error_obj.message.lower()
-                    elif hasattr(error_obj, 'data') and error_obj.data:
-                        error_data_msg = str(error_obj.data).lower()
-                
-                # Combine error messages for detection
-                combined_error = f"{error_str} {error_data_msg}"
-                
-                logger.error(f"❌ list_tools() failed (attempt {init_attempt + 1}/{max_init_retries}): {error_type}: {error_msg}")
-                
-                # Log detailed error information on first attempt
-                if init_attempt == 0:
-                    import traceback
-                    logger.debug(f"First list_tools attempt error traceback:\n{traceback.format_exc()}")
-                    if hasattr(e, 'args') and e.args:
-                        logger.debug(f"Error args: {e.args}")
-                    if hasattr(e, '__dict__'):
-                        logger.debug(f"Error dict: {e.__dict__}")
-                
-                # Handle "initialization not complete" errors specifically
-                # This is the key issue: server says "Received request before initialization was complete"
-                # Even though __aenter__() should have waited for initialized notification,
-                # the server might need additional time to process it
-                if ("initialization" in combined_error or 
-                    "before initialization" in combined_error or 
-                    "not initialized" in combined_error or
-                    "initialization was complete" in combined_error):
-                    if init_attempt < max_init_retries - 1:
-                        # Exponential backoff for initialization issues: 0.5s, 1s, 2s, 4s, 8s
-                        wait_time = 0.5 * (2 ** init_attempt)
-                        logger.warning(f"⚠️ Server initialization not complete yet (attempt {init_attempt + 1}/{max_init_retries})")
-                        logger.debug(f"   Waiting {wait_time:.2f}s for server to finish initialization...")
-                        await asyncio.sleep(wait_time)
-                        continue
-                elif "invalid request" in combined_error or "invalid request parameters" in combined_error:
-                    # Invalid request often means server not ready - treat similar to initialization
-                    if init_attempt < max_init_retries - 1:
-                        # Exponential backoff for invalid request errors
-                        wait_time = 0.5 * (2 ** init_attempt)
-                        logger.warning(f"⚠️ Invalid request parameters - server may not be ready (attempt {init_attempt + 1}/{max_init_retries})")
-                        logger.debug(f"   Waiting {wait_time:.2f}s before retry...")
-                        await asyncio.sleep(wait_time)
-                        continue
-                elif init_attempt < max_init_retries - 1:
-                    # Exponential backoff for other errors
-                    wait_time = 0.5 * (2 ** init_attempt)
-                    logger.debug(f"Waiting {wait_time:.2f}s before retry...")
-                    await asyncio.sleep(wait_time)
-                else:
-                    logger.error(f"❌ Could not list tools after {max_init_retries} attempts")
-                    # Don't continue - if we can't list tools, the session is not usable
-                    try:
-                        await session.__aexit__(None, None, None)
-                    except:
-                        pass
-                    try:
-                        await stdio_ctx.__aexit__(None, None, None)
-                    except:
-                        pass
-                    return None
-        
-        if not tools_listed:
-            error_msg = str(last_error) if last_error else "Unknown error"
-            error_type = type(last_error).__name__ if last_error else "UnknownError"
-            logger.error(f"❌ MCP server failed to initialize - tools could not be listed")
-            logger.error(f"   Last error: {error_type}: {error_msg}")
-            if last_error:
-                import traceback
-                logger.debug(f"Final error traceback:\n{traceback.format_exc()}")
-            try:
-                await session.__aexit__(None, None, None)
-            except:
-                pass
             try:
                 await stdio_ctx.__aexit__(None, None, None)
             except:
@@ -498,14 +299,12 @@ async def get_mcp_session():
         # Store both the session and stdio context to keep them alive
         global_mcp_session = session
         global_mcp_stdio_ctx = stdio_ctx
-        logger.info("✅ MCP client session created and verified successfully")
+        logger.info("✅ MCP client session created successfully")
         return session
     except Exception as e:
         error_type = type(e).__name__
         error_msg = str(e)
         logger.error(f"❌ Failed to create MCP client session: {error_type}: {error_msg}")
-        import traceback
-        logger.debug(f"Session creation error traceback:\n{traceback.format_exc()}")
         global_mcp_session = None
         global_mcp_stdio_ctx = None
         return None
@@ -522,25 +321,12 @@ async def call_agent(user_prompt: str, system_prompt: str = None, files: list = 
             logger.warning("Failed to get MCP session for Gemini call")
             return ""
         
-        # Retry listing tools if it fails the first time
-        # Use more retries and longer waits since MCP server might need time
-        max_retries = 5
-        tools = None
-        for attempt in range(max_retries):
-            try:
-                tools = await session.list_tools()
-                if tools and hasattr(tools, 'tools') and len(tools.tools) > 0:
-                    break
-                else:
-                    raise ValueError("Empty tools list")
-            except Exception as e:
-                if attempt < max_retries - 1:
-                    wait_time = 1.0 * (attempt + 1)  # Progressive wait
-                    logger.debug(f"Failed to list tools (attempt {attempt + 1}/{max_retries}), waiting {wait_time}s...")
-                    await asyncio.sleep(wait_time)
-                else:
-                    logger.error(f"❌ Failed to list MCP tools after {max_retries} attempts: {e}")
-                    return ""
+        # List tools - session should be ready after proper initialization
+        try:
+            tools = await session.list_tools()
+        except Exception as e:
+            logger.error(f"❌ Failed to list MCP tools: {e}")
+            return ""
         
         if not tools or not hasattr(tools, 'tools'):
             logger.error("Invalid tools response from MCP server")
@@ -571,8 +357,6 @@ async def call_agent(user_prompt: str, system_prompt: str = None, files: list = 
         if temperature is not None:
             arguments["temperature"] = temperature
         
-        logger.info(f"🔧 [MCP] Calling Gemini MCP tool '{generate_tool.name}' for: {user_prompt[:100]}...")
-        logger.info(f"📋 [MCP] Arguments: model={model}, temperature={temperature}, files={len(files) if files else 0}")
         result = await session.call_tool(generate_tool.name, arguments=arguments)
         
         # Parse result
@@ -580,14 +364,11 @@ async def call_agent(user_prompt: str, system_prompt: str = None, files: list = 
             for item in result.content:
                 if hasattr(item, 'text'):
                     response_text = item.text.strip()
-                    logger.info(f"✅ [MCP] Gemini MCP returned response ({len(response_text)} chars)")
                     return response_text
-        logger.warning("⚠️ [MCP] Gemini MCP returned empty or invalid result")
+        logger.warning("⚠️ Gemini MCP returned empty or invalid result")
         return ""
     except Exception as e:
         logger.error(f"Gemini MCP call error: {e}")
-        import traceback
-        logger.debug(traceback.format_exc())
         return ""
 
 def initialize_medical_model(model_name: str):
@@ -656,8 +437,6 @@ async def transcribe_audio_gemini(audio_path: str) -> str:
         return result.strip()
     except Exception as e:
         logger.error(f"Gemini transcription error: {e}")
-        import traceback
-        logger.debug(traceback.format_exc())
         return ""
 
 def transcribe_audio(audio):
@@ -746,7 +525,7 @@ async def generate_speech_mcp(text: str) -> str:
                             return tmp_file.name
         return None
     except Exception as e:
-        logger.debug(f"MCP TTS error: {e}")
+        logger.warning(f"MCP TTS error: {e}")
         return None
 
 def generate_speech(text: str):
@@ -770,10 +549,9 @@ def generate_speech(text: str):
             else:
                 audio_path = loop.run_until_complete(generate_speech_mcp(text))
                 if audio_path:
-                    logger.info("Generated speech via MCP")
                     return audio_path
         except Exception as e:
-            logger.debug(f"MCP TTS not available: {e}")
+            pass  # MCP TTS not available, fallback to local
     
     # Fallback to local TTS model
     if not TTS_AVAILABLE:
@@ -915,19 +693,12 @@ async def search_web_mcp_tool(query: str, max_results: int = 5) -> list:
         if session is None:
             return []
         
-        # Retry listing tools if it fails the first time
-        max_retries = 3
-        tools = None
-        for attempt in range(max_retries):
-            try:
-                tools = await session.list_tools()
-                break
-            except Exception as e:
-                if attempt < max_retries - 1:
-                    await asyncio.sleep(0.5 * (attempt + 1))
-                else:
-                    logger.error(f"Failed to list MCP tools after {max_retries} attempts: {e}")
-                    return []
+        # List tools - session should be ready after proper initialization
+        try:
+            tools = await session.list_tools()
+        except Exception as e:
+            logger.error(f"Failed to list MCP tools: {e}")
+            return []
         
         if not tools or not hasattr(tools, 'tools'):
             return []
@@ -943,7 +714,6 @@ async def search_web_mcp_tool(query: str, max_results: int = 5) -> list:
         
         if search_tool:
             try:
-                logger.info(f"🔍 [MCP] Using web search MCP tool '{search_tool.name}' for: {query[:100]}...")
                 # Call the search tool
                 result = await session.call_tool(
                     search_tool.name,
@@ -987,7 +757,6 @@ async def search_web_mcp_tool(query: str, max_results: int = 5) -> list:
                                 })
                 
                 if web_content:
-                    logger.info(f"✅ [MCP] Web search MCP tool returned {len(web_content)} results")
                     return web_content
             except Exception as e:
                 logger.error(f"Error calling web search MCP tool: {e}")
@@ -1114,7 +883,6 @@ def search_web(query: str, max_results: int = 5) -> list:
 
 async def summarize_web_content_gemini(content_list: list, query: str) -> str:
     """Summarize web search results using Gemini MCP"""
-    logger.info(f"📝 [MCP] Summarizing {len(content_list)} web search results using Gemini MCP...")
     combined_content = "\n\n".join([f"Source: {item['title']}\n{item['content']}" for item in content_list[:3]])
     
     user_prompt = f"""Summarize the following web search results related to the query: "{query}"
@@ -1132,11 +900,6 @@ Summary:"""
         model=GEMINI_MODEL,  # Use full model for summarization
         temperature=0.5
     )
-    
-    if result:
-        logger.info(f"✅ [MCP] Web content summarized successfully using Gemini MCP ({len(result)} chars)")
-    else:
-        logger.warning("⚠️ [MCP] Gemini MCP summarization returned empty result")
     
     return result.strip()
 
@@ -1191,7 +954,6 @@ def get_llm_for_rag(temperature=0.7, max_new_tokens=256, top_p=0.95, top_k=50):
 
 async def autonomous_reasoning_gemini(query: str) -> dict:
     """Autonomous reasoning using Gemini MCP"""
-    logger.info(f"🧠 [MCP] Analyzing query with Gemini MCP: {query[:100]}...")
     reasoning_prompt = f"""Analyze this medical query and provide structured reasoning:
 Query: "{query}"
 Analyze:
@@ -1263,34 +1025,19 @@ def autonomous_reasoning(query: str, history: list) -> dict:
         }
     
     try:
-        logger.info("🤔 [MCP] Using Gemini MCP for autonomous reasoning...")
         loop = asyncio.get_event_loop()
         if loop.is_running():
             try:
                 import nest_asyncio
                 reasoning = nest_asyncio.run(autonomous_reasoning_gemini(query))
-                if reasoning and reasoning.get("query_type") != "general_info":  # Check if we got real reasoning
-                    logger.info(f"✅ [MCP] Gemini MCP reasoning successful: {reasoning.get('query_type')}, complexity: {reasoning.get('complexity')}")
-                    return reasoning
-                else:
-                    logger.warning("⚠️ [MCP] Gemini MCP returned fallback reasoning, using it anyway")
-                    return reasoning
+                return reasoning
             except Exception as e:
-                logger.error(f"❌ Error in nested async reasoning: {e}")
-                import traceback
-                logger.debug(traceback.format_exc())
+                logger.error(f"Error in nested async reasoning: {e}")
         else:
             reasoning = loop.run_until_complete(autonomous_reasoning_gemini(query))
-            if reasoning and reasoning.get("query_type") != "general_info":
-                logger.info(f"✅ [MCP] Gemini MCP reasoning successful: {reasoning.get('query_type')}, complexity: {reasoning.get('complexity')}")
-                return reasoning
-            else:
-                logger.warning("⚠️ [MCP] Gemini MCP returned fallback reasoning, using it anyway")
-                return reasoning
+            return reasoning
     except Exception as e:
-        logger.error(f"❌ Gemini MCP reasoning error: {e}")
-        import traceback
-        logger.debug(traceback.format_exc())
+        logger.error(f"Gemini MCP reasoning error: {e}")
     
     # Fallback reasoning only if all attempts failed
     logger.warning("⚠️ Falling back to default reasoning")
@@ -1511,8 +1258,6 @@ async def parse_document_gemini(file_path: str, file_extension: str) -> str:
         return result.strip()
     except Exception as e:
         logger.error(f"Gemini document parsing error: {e}")
-        import traceback
-        logger.debug(traceback.format_exc())
         return ""
 
 def extract_text_from_document(file):
@@ -1812,10 +1557,8 @@ def stream_chat(
             logger.info(f"📊 Found {len(web_results)} web search results, now summarizing with Gemini MCP...")
             web_summary = summarize_web_content(web_results, message)
             if web_summary and len(web_summary) > 50:  # Check if we got a real summary
-                logger.info(f"✅ [MCP] Gemini MCP summarization successful ({len(web_summary)} chars)")
                 web_context = f"\n\nAdditional Web Sources (summarized with Gemini MCP):\n{web_summary}"
             else:
-                logger.warning("⚠️ [MCP] Gemini MCP summarization failed or returned empty, using raw results")
                 # Fallback: use first result's content
                 web_context = f"\n\nAdditional Web Sources:\n{web_results[0].get('content', '')[:500]}"
             web_sources = [r['title'] for r in web_results[:3]]
