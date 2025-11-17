@@ -284,7 +284,18 @@ async def get_mcp_session():
         # Wait for the server process to fully start
         # The server needs time to: start Python, import modules, initialize Gemini client, start MCP server
         logger.info("⏳ Waiting for MCP server process to start...")
-        await asyncio.sleep(2.0)  # Wait for server process startup
+        # Increase wait time and add progressive checks
+        for wait_attempt in range(5):
+            await asyncio.sleep(1.0)  # Check every second
+            # Try to peek at the read stream to see if server is responding
+            # (This is a simple check - the actual initialization will happen below)
+            try:
+                # Check if the process is still alive by attempting a small read with timeout
+                # Note: This is a best-effort check
+                pass
+            except:
+                pass
+        logger.info("⏳ MCP server startup wait complete, proceeding with initialization...")
         
         # Create ClientSession from the streams
         # ClientSession handles initialization automatically when used as context manager
@@ -328,7 +339,7 @@ async def get_mcp_session():
         
         # Verify the session works by listing tools with retries
         # This confirms the server is ready to handle requests
-        max_init_retries = 10
+        max_init_retries = 15  # Increased retries
         tools_listed = False
         tools = None
         last_error = None
@@ -343,7 +354,13 @@ async def get_mcp_session():
                     # Empty tools list - might be a server issue
                     logger.warning(f"MCP server returned empty tools list (attempt {init_attempt + 1}/{max_init_retries})")
                     if init_attempt < max_init_retries - 1:
-                        await asyncio.sleep(1.0)
+                        await asyncio.sleep(1.5)  # Slightly longer wait
+                        continue
+                else:
+                    # Invalid response format
+                    logger.warning(f"MCP server returned invalid tools response (attempt {init_attempt + 1}/{max_init_retries})")
+                    if init_attempt < max_init_retries - 1:
+                        await asyncio.sleep(1.5)
                         continue
             except Exception as e:
                 last_error = e

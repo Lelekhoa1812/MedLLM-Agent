@@ -13,7 +13,9 @@ google-genai
 langdetect
 gradio
 # MCP dependencies (required for Gemini MCP)
-mcp
+# Install MCP SDK: pip install mcp
+# The MCP package provides Model Context Protocol server and client functionality
+mcp>=0.1.0
 nest-asyncio
 google-generativeai
 # Fallback dependencies (used if MCP is not available)

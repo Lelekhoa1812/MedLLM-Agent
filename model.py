@@ -61,48 +61,69 @@ def initialize_medical_model(model_name: str):
         # - pad_token: typically not set, but we use eos_token
         
         # Ensure eos_token is properly set (LLaMA uses </s> with ID 2)
+        # MedAlpaca-7B is finetuned from LLaMA-7B, which uses </s> as EOS token
         if tokenizer.eos_token is None:
-            # Try to decode eos_token_id if it exists
+            # First try to get eos_token_id from tokenizer config
             if hasattr(tokenizer, 'eos_token_id') and tokenizer.eos_token_id is not None:
-                try:
-                    eos_id = tokenizer.eos_token_id
-                    # Decode the token ID to get the string
-                    tokenizer.eos_token = tokenizer.decode([eos_id]) if eos_id < tokenizer.vocab_size else "</s>"
-                except:
-                    # Fallback: LLaMA uses </s> as EOS
-                    tokenizer.eos_token = "</s>"
+                eos_id = tokenizer.eos_token_id
+                # Try to decode the token ID to get the string representation
+                if eos_id < len(tokenizer):
                     try:
-                        tokenizer.eos_token_id = tokenizer.convert_tokens_to_ids("</s>")
+                        decoded = tokenizer.decode([eos_id])
+                        # Clean up decoded token (remove special characters)
+                        if decoded and decoded.strip():
+                            tokenizer.eos_token = decoded.strip()
+                        else:
+                            tokenizer.eos_token = "</s>"
                     except:
-                        # If </s> doesn't exist, use ID 2 (standard LLaMA EOS token ID)
-                        tokenizer.eos_token_id = 2
+                        tokenizer.eos_token = "</s>"
+                else:
+                    tokenizer.eos_token = "</s>"
+                    tokenizer.eos_token_id = 2  # Standard LLaMA EOS token ID
             else:
-                # Set EOS token to </s> (standard for LLaMA)
+                # Set EOS token to </s> (standard for LLaMA/MedAlpaca)
                 tokenizer.eos_token = "</s>"
                 try:
-                    tokenizer.eos_token_id = tokenizer.convert_tokens_to_ids("</s>")
+                    # Try to get the token ID for </s>
+                    if "</s>" in tokenizer.get_vocab():
+                        tokenizer.eos_token_id = tokenizer.get_vocab()["</s>"]
+                    else:
+                        # Fallback to standard LLaMA EOS token ID
+                        tokenizer.eos_token_id = 2
                 except:
                     # Standard LLaMA EOS token ID is 2
                     tokenizer.eos_token_id = 2
         
         # Ensure bos_token is set (LLaMA uses <s> with ID 1)
+        # MedAlpaca-7B is finetuned from LLaMA-7B, which uses <s> as BOS token
         if tokenizer.bos_token is None:
             if hasattr(tokenizer, 'bos_token_id') and tokenizer.bos_token_id is not None:
-                try:
-                    bos_id = tokenizer.bos_token_id
-                    tokenizer.bos_token = tokenizer.decode([bos_id]) if bos_id < tokenizer.vocab_size else "<s>"
-                except:
-                    tokenizer.bos_token = "<s>"
+                bos_id = tokenizer.bos_token_id
+                # Try to decode the token ID to get the string representation
+                if bos_id < len(tokenizer):
                     try:
-                        tokenizer.bos_token_id = tokenizer.convert_tokens_to_ids("<s>")
+                        decoded = tokenizer.decode([bos_id])
+                        # Clean up decoded token (remove special characters)
+                        if decoded and decoded.strip():
+                            tokenizer.bos_token = decoded.strip()
+                        else:
+                            tokenizer.bos_token = "<s>"
                     except:
-                        tokenizer.bos_token_id = 1  # Standard LLaMA BOS token ID
+                        tokenizer.bos_token = "<s>"
+                else:
+                    tokenizer.bos_token = "<s>"
+                    tokenizer.bos_token_id = 1  # Standard LLaMA BOS token ID
             else:
                 tokenizer.bos_token = "<s>"
                 try:
-                    tokenizer.bos_token_id = tokenizer.convert_tokens_to_ids("<s>")
+                    # Try to get the token ID for <s>
+                    if "<s>" in tokenizer.get_vocab():
+                        tokenizer.bos_token_id = tokenizer.get_vocab()["<s>"]
+                    else:
+                        # Fallback to standard LLaMA BOS token ID
+                        tokenizer.bos_token_id = 1
                 except:
-                    tokenizer.bos_token_id = 1
+                    tokenizer.bos_token_id = 1  # Standard LLaMA BOS token ID
         
         # Set pad_token - MedAlpaca/LLaMA models typically use EOS as PAD
         # This is important for batch processing

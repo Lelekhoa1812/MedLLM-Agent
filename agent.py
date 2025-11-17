@@ -18,9 +18,12 @@ from pathlib import Path
 try:
     from mcp.server import Server
     from mcp.types import Tool, TextContent, ImageContent, EmbeddedResource, InitializationOptions, ServerCapabilities
-except ImportError:
-    print("Error: MCP SDK not installed. Install with: pip install mcp", file=sys.stderr)
-    sys.exit(1)
+    MCP_AVAILABLE = True
+except ImportError as e:
+    print(f"Error: MCP SDK not installed. Install with: pip install mcp", file=sys.stderr)
+    print(f"Import error details: {e}", file=sys.stderr)
+    MCP_AVAILABLE = False
+    # Don't exit immediately - let the main function handle it gracefully
 
 # Gemini imports
 try:
@@ -270,13 +273,23 @@ async def call_tool(name: str, arguments: dict) -> Sequence[TextContent | ImageC
 
 async def main():
     """Main entry point"""
+    if not MCP_AVAILABLE:
+        logger.error("MCP SDK not available. Cannot start MCP server.")
+        print("Error: MCP SDK not installed. Install with: pip install mcp", file=sys.stderr)
+        sys.exit(1)
+    
     logger.info("Starting Gemini MCP Server...")
     logger.info(f"Gemini API Key: {'Set' if GEMINI_API_KEY else 'Not Set'}")
     logger.info(f"Default Model: {GEMINI_MODEL}")
     logger.info(f"Default Lite Model: {GEMINI_MODEL_LITE}")
     
     # Use stdio_server from mcp.server.stdio
-    from mcp.server.stdio import stdio_server
+    try:
+        from mcp.server.stdio import stdio_server
+    except ImportError as e:
+        logger.error(f"Failed to import stdio_server: {e}")
+        print(f"Error: Failed to import MCP stdio_server: {e}", file=sys.stderr)
+        sys.exit(1)
     
     # Suppress root logger warnings during initialization
     # These are expected during the MCP initialization handshake
