@@ -2060,7 +2060,7 @@ def stream_chat(
         
     # Update history with final answer (ONLY final answer, no internal thoughts)
     updated_history[-1]["content"] = final_answer_with_metadata
-        yield updated_history
+    yield updated_history
             
     # Log completion
     logger.info(f"[MAC] Final answer generated: {len(final_answer)} chars, {len(breakdown.get('sub_topics', []))} tasks completed")
