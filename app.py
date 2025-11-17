@@ -725,6 +725,7 @@ def format_prompt_manually(messages: list, tokenizer) -> str:
     - Simple Question/Answer format
     - System prompt as instruction context
     - Clean formatting without extra special tokens
+    - Ensure no double special tokens are added
     """
     # Combine system and user messages into a single instruction
     system_content = ""
@@ -744,11 +745,16 @@ def format_prompt_manually(messages: list, tokenizer) -> str:
     
     # Format for MedAlpaca/LLaMA-based medical models
     # Common format: Instruction + Input -> Response
-    # Following the exact example pattern
+    # Following the exact example pattern - keep it simple and clean
+    # The tokenizer will add BOS token automatically, so we don't add it here
     if system_content:
+        # Clean format: system instruction, then question, then answer prompt
         prompt = f"{system_content}\n\nQuestion: {user_content}\n\nAnswer:"
     else:
         prompt = f"Question: {user_content}\n\nAnswer:"
+    
+    # Ensure prompt is clean (no extra whitespace or special characters)
+    prompt = prompt.strip()
     
     return prompt
 
@@ -1801,8 +1807,15 @@ def stream_chat(
         prompt = format_prompt_manually(messages, medical_tokenizer)
     
     # Calculate prompt length for stopping criteria
-    # Tokenize to get length - use same tokenization as model.py (simple, no extra params)
-    inputs = medical_tokenizer(prompt, return_tensors="pt")
+    # Tokenize to get length - use EXACT same tokenization as model.py
+    # This ensures consistency and prevents tokenization mismatches
+    inputs = medical_tokenizer(
+        prompt,
+        return_tensors="pt",
+        add_special_tokens=True,  # Match model.py tokenization
+        padding=False,
+        truncation=False
+    )
     prompt_length = inputs['input_ids'].shape[1]
     logger.debug(f"Prompt length: {prompt_length} tokens")
     
@@ -1844,10 +1857,13 @@ def stream_chat(
         MedicalStoppingCriteria(eos_token_id, prompt_length, min_new_tokens=100)
     ])
     
+    # Create streamer with correct settings for LLaMA-based models
+    # skip_special_tokens=True ensures clean text output without special token artifacts
     streamer = TextIteratorStreamer(
         medical_tokenizer,
         skip_prompt=True,
-        skip_special_tokens=True
+        skip_special_tokens=True,  # Skip special tokens in output for clean text
+        timeout=None  # Don't timeout on long generations
     )
     
     temperature = float(temperature) if isinstance(temperature, (int, float)) else 0.7
