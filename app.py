@@ -1156,19 +1156,17 @@ def autonomous_execution_strategy(reasoning: dict, plan: dict, use_rag: bool, us
         "rationale": ""
     }
     
-    # Only suggest web search override (RAG requires documents, so we respect user's choice)
+    # Respect user toggle; just log recommendation if web search is disabled
     if reasoning.get("requires_web_search", False) and not use_web_search:
-        strategy["use_web_search"] = True
-        strategy["reasoning_override"] = True
-        strategy["rationale"] += "Reasoning suggests web search for current information. "
+        strategy["rationale"] = "Reasoning suggests web search for current information, but the user kept it disabled."
     
     # Note: We don't override RAG setting because:
     # 1. User may have explicitly disabled it
     # 2. RAG requires documents to be uploaded
     # 3. We should respect user's explicit choice
     
-    if strategy["reasoning_override"]:
-        logger.info(f"Autonomous override: {strategy['rationale']}")
+    if strategy["rationale"]:
+        logger.info(f"Autonomous reasoning note: {strategy['rationale']}")
     
     return strategy
 
@@ -1619,7 +1617,6 @@ def stream_chat(
     
     supervisor_directives = None
     supervisor_directives_text = ""
-    supervisor_user_note = ""
     time_pressure_flag = False
     time_pressure_message = ""
     
@@ -1648,14 +1645,13 @@ def stream_chat(
         logger.info("🎯 Determining execution strategy...")
         execution_strategy = autonomous_execution_strategy(reasoning, plan, use_rag, use_web_search, has_rag_index)
         
-        # Use autonomous strategy decisions (respect user's RAG setting)
+        # Use autonomous strategy decisions (respect user's RAG setting and user toggles)
         final_use_rag = execution_strategy["use_rag"] and has_rag_index  # Only use RAG if enabled AND documents exist
         final_use_web_search = execution_strategy["use_web_search"]
         
-        # Show reasoning override message if applicable
-        reasoning_note = ""
-        if execution_strategy["reasoning_override"]:
-            reasoning_note = f"\n\n💡 *Autonomous Reasoning: {execution_strategy['rationale']}*"
+        reasoning_note = execution_strategy.get("rationale", "")
+        if reasoning_note:
+            logger.info(f"Autonomous reasoning note: {reasoning_note}")
         
         supervisor_directives = gemini_supervisor_directives(
             message,
@@ -1666,12 +1662,12 @@ def stream_chat(
         )
         supervisor_directives_text = format_supervisor_directives_text(supervisor_directives)
         if supervisor_directives_text:
-            supervisor_user_note = f"🧭 Gemini Supervisor Tasks:\n{supervisor_directives_text}"
+            logger.info(f"Gemini Supervisor Tasks:\n{supervisor_directives_text}")
         
         if supervisor_directives.get("fast_track"):
             logger.info("⚡ Supervisor requested fast-track execution to respect time budget.")
             final_use_web_search = False  # Skip optional web search when supervisor requests fast track
-            reasoning_note += "\n\n⚡ *Supervisor: Fast-track requested due to limited time. Prioritize concise synthesis.*"
+            logger.info("⚡ Supervisor: Fast-track requested due to limited time. Prioritizing concise synthesis.")
         
         
         # Detect language and translate if needed (Step 1 of plan)
@@ -1934,14 +1930,7 @@ def stream_chat(
                 updated_history[-1]["content"] = partial_response
         
         # Add reasoning note if autonomous override occurred
-        header_sections = []
-        if supervisor_user_note:
-            header_sections.append(supervisor_user_note)
-        if reasoning_note:
-            header_sections.append(reasoning_note)
-        if header_sections:
-            partial_response = "\n\n".join(header_sections) + "\n\n" + partial_response
-            updated_history[-1]["content"] = partial_response
+        # Internal planning notes stay in logs only; nothing is prepended to the user response
         
         # Translate back if needed
         if needs_translation and partial_response:
