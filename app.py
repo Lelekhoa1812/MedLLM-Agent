@@ -264,9 +264,6 @@ async def get_mcp_session():
         stdio_ctx = stdio_client(server_params)
         read, write = await stdio_ctx.__aenter__()
         
-        # Wait for the server process to start and be ready
-        await asyncio.sleep(1.5)  # Wait for server startup
-        
         # Create ClientSession from the streams
         session = ClientSession(read, write)
         
@@ -278,12 +275,11 @@ async def get_mcp_session():
         # According to MCP protocol spec, the client MUST wait for the initialized notification
         # before sending any other requests (like list_tools)
         try:
+            # The __aenter__() method properly handles the full initialization sequence
+            # including waiting for the server's initialized notification
+            # This is a blocking call that completes only after the server sends initialized
             await session.__aenter__()
             logger.info("✅ MCP session initialized")
-            
-            # After __aenter__() completes, wait a bit longer to ensure server's internal state is ready
-            # The server may have sent the initialized notification but needs time to set up handlers
-            await asyncio.sleep(1.0)  # Give server time to finalize internal state
         except Exception as e:
             error_msg = str(e)
             error_type = type(e).__name__
@@ -322,11 +318,24 @@ async def call_agent(user_prompt: str, system_prompt: str = None, files: list = 
             return ""
         
         # List tools - session should be ready after proper initialization
+        # Add a small delay to ensure server has fully processed initialization
+        await asyncio.sleep(0.1)
         try:
             tools = await session.list_tools()
         except Exception as e:
-            logger.error(f"❌ Failed to list MCP tools: {e}")
-            return ""
+            error_msg = str(e)
+            # Check if it's an initialization error
+            if "initialization" in error_msg.lower() or "before initialization" in error_msg.lower():
+                logger.warning(f"⚠️ Server not ready yet, waiting a bit more...: {error_msg}")
+                await asyncio.sleep(0.5)
+                try:
+                    tools = await session.list_tools()
+                except Exception as retry_error:
+                    logger.error(f"❌ Failed to list MCP tools after retry: {retry_error}")
+                    return ""
+            else:
+                logger.error(f"❌ Failed to list MCP tools: {error_msg}")
+                return ""
         
         if not tools or not hasattr(tools, 'tools'):
             logger.error("Invalid tools response from MCP server")
@@ -694,11 +703,24 @@ async def search_web_mcp_tool(query: str, max_results: int = 5) -> list:
             return []
         
         # List tools - session should be ready after proper initialization
+        # Add a small delay to ensure server has fully processed initialization
+        await asyncio.sleep(0.1)
         try:
             tools = await session.list_tools()
         except Exception as e:
-            logger.error(f"Failed to list MCP tools: {e}")
-            return []
+            error_msg = str(e)
+            # Check if it's an initialization error
+            if "initialization" in error_msg.lower() or "before initialization" in error_msg.lower():
+                logger.warning(f"⚠️ Server not ready yet, waiting a bit more...: {error_msg}")
+                await asyncio.sleep(0.5)
+                try:
+                    tools = await session.list_tools()
+                except Exception as retry_error:
+                    logger.error(f"Failed to list MCP tools after retry: {retry_error}")
+                    return []
+            else:
+                logger.error(f"Failed to list MCP tools: {error_msg}")
+                return []
         
         if not tools or not hasattr(tools, 'tools'):
             return []

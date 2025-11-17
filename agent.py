@@ -18,7 +18,6 @@ from pathlib import Path
 try:
     from mcp.server import Server
     from mcp.types import Tool, TextContent, ImageContent, EmbeddedResource
-    from mcp.server.models import InitializationOptions
 except ImportError:
     print("Error: MCP SDK not installed. Install with: pip install mcp", file=sys.stderr)
     sys.exit(1)
@@ -282,47 +281,15 @@ async def main():
     
     try:
         async with stdio_server() as streams:
-            # Create initialization options
-            # The Server class will automatically provide its capabilities based on
-            # the registered @app.list_tools() and @app.call_tool() handlers
-            try:
-                # Try to get capabilities from the server if the method exists
-                if hasattr(app, 'get_capabilities'):
-                    try:
-                        # Try with NotificationOptions if available
-                        from mcp.server.lowlevel.server import NotificationOptions
-                        server_capabilities = app.get_capabilities(
-                            notification_options=NotificationOptions(),
-                            experimental_capabilities={}
-                        )
-                    except (ImportError, AttributeError, TypeError):
-                        # Fallback: try without NotificationOptions
-                        try:
-                            server_capabilities = app.get_capabilities()
-                        except Exception:
-                            # If get_capabilities doesn't work, create minimal capabilities
-                            server_capabilities = {}
-                else:
-                    # Server will provide capabilities automatically, use empty dict
-                    server_capabilities = {}
-            except Exception:
-                # Server will handle capabilities automatically
-                server_capabilities = {}
-            
-            # Create initialization options
-            init_options = InitializationOptions(
-                server_name="gemini-mcp-server",
-                server_version="1.0.0",
-                capabilities=server_capabilities
-            )
-            
-            # Run the server with initialization options
+            # The Server class automatically handles initialization and provides capabilities
+            # based on the registered @app.list_tools() and @app.call_tool() handlers
+            # No need to manually create InitializationOptions - the server handles this
             logger.info("MCP server ready")
             try:
+                # Run the server - it will automatically handle the initialization handshake
                 await app.run(
                     read_stream=streams[0],
-                    write_stream=streams[1],
-                    initialization_options=init_options
+                    write_stream=streams[1]
                 )
             except Exception as run_error:
                 logger.error(f"Error in app.run(): {run_error}")
