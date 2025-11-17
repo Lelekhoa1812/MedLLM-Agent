@@ -200,20 +200,18 @@ global_mcp_session = None
 global_mcp_stdio_ctx = None  # Store stdio context to keep it alive
 global_mcp_lock = threading.Lock()  # Lock for thread-safe session access
 # MCP server configuration via environment variables
-# Gemini MCP server options:
-# 1. Node.js version (recommended): npx @rlabs/gemini-mcp
-# 2. Python version: If you have a Python Gemini MCP server package installed
+# Gemini MCP server: Python-based server (gemini_mcp_server.py)
+# This works on Hugging Face Spaces without requiring npm/Node.js
 # Make sure GEMINI_API_KEY is set in environment variables
 # 
-# To use Node.js version (default):
-#   export MCP_SERVER_COMMAND="npx"
-#   export MCP_SERVER_ARGS="@rlabs/gemini-mcp"
-#
-# To use Python version (if available):
+# Default configuration uses the bundled gemini_mcp_server.py script
+# To override:
 #   export MCP_SERVER_COMMAND="python"
-#   export MCP_SERVER_ARGS="-m your_gemini_mcp_package"
-MCP_SERVER_COMMAND = os.environ.get("MCP_SERVER_COMMAND", "npx")
-MCP_SERVER_ARGS = os.environ.get("MCP_SERVER_ARGS", "@rlabs/gemini-mcp").split() if os.environ.get("MCP_SERVER_ARGS") else ["@rlabs/gemini-mcp"]
+#   export MCP_SERVER_ARGS="/path/to/gemini_mcp_server.py"
+script_dir = os.path.dirname(os.path.abspath(__file__))
+gemini_mcp_server_path = os.path.join(script_dir, "gemini_mcp_server.py")
+MCP_SERVER_COMMAND = os.environ.get("MCP_SERVER_COMMAND", "python")
+MCP_SERVER_ARGS = os.environ.get("MCP_SERVER_ARGS", gemini_mcp_server_path).split() if os.environ.get("MCP_SERVER_ARGS") else [gemini_mcp_server_path]
 
 async def get_mcp_session():
     """Get or create MCP client session with proper context management"""

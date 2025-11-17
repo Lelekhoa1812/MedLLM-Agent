@@ -91,7 +91,7 @@ tags:
 - **RAG Framework**: LlamaIndex with hierarchical node parsing
 - **Web Search**: Model Context Protocol (MCP) tools with automatic fallback to DuckDuckGo
 - **MCP Client**: Python MCP SDK for standardized tool integration
-- **Gemini MCP Server**: aistudio-mcp-server via MCP protocol
+- **Gemini MCP Server**: mcp-server via MCP protocol
 
 ## 📋 Requirements
 
@@ -112,7 +112,7 @@ export GEMINI_API_KEY="your-gemini-api-key"
 
 # Gemini MCP Server Configuration
 export MCP_SERVER_COMMAND="python"
-export MCP_SERVER_ARGS="-m aistudio_mcp_server"
+export MCP_SERVER_ARGS="-m mcp_server"
 
 # Optional Gemini Configuration
 export GEMINI_MODEL="gemini-2.5-flash"  # For harder tasks (default)
@@ -146,7 +146,7 @@ export GEMINI_TEMPERATURE=0.2  # Temperature for generation 0-2 (default: 0.2)
 2. **Install Gemini MCP Server**:
    ```bash
    # Install Python package
-   pip install aistudio-mcp-server
+   pip install mcp-server
    ```
 
 3. **Get Gemini API Key**:
@@ -157,7 +157,7 @@ export GEMINI_TEMPERATURE=0.2  # Temperature for generation 0-2 (default: 0.2)
    ```bash
    export GEMINI_API_KEY="your-gemini-api-key"
    export MCP_SERVER_COMMAND="python"
-   export MCP_SERVER_ARGS="-m aistudio_mcp_server"
+   export MCP_SERVER_ARGS="-m mcp_server"
    ```
 
 **Note**: The application requires Gemini MCP for translation, document parsing, transcription, and summarization. Web search functionality still supports fallback to direct library calls if MCP is not configured.
