@@ -83,7 +83,6 @@ def get_embedding_model():
     return HuggingFaceEmbedding(model_name=EMBEDDING_MODEL, token=HF_TOKEN)
 
 
-@spaces.GPU(max_duration=120)
 def generate_with_medswin(
     medical_model_obj,
     medical_tokenizer,
@@ -104,6 +103,10 @@ def generate_with_medswin(
     
     This function only performs the actual model inference on GPU.
     All other operations (prompt preparation, post-processing) should be done outside.
+    
+    Note: This function is NOT decorated with @spaces.GPU because it's called from a thread
+    with unpicklable objects (threading.Event, TextIteratorStreamer). The model is already
+    on GPU (initialized with device_map="auto"), so the decorator is not needed.
     """
     # Tokenize prompt (this is a CPU operation but happens here for simplicity)
     # The actual GPU work is in model.generate()
