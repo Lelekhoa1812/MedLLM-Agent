@@ -297,7 +297,7 @@ async def get_mcp_session():
         
         # Verify the session works by listing tools with retries
         # This confirms the server is ready to handle requests
-        max_init_retries = 15
+        max_init_retries = 5
         tools_listed = False
         tools = None
         last_error = None
@@ -2015,7 +2015,7 @@ def create_demo():
                         use_rag = gr.Checkbox(
                             value=False,
                             label="Enable Document RAG",
-                            info="Answer based on uploaded documents (requires document upload)"
+                            info="Answer based on uploaded documents (upload required)"
                         )
                         use_web_search = gr.Checkbox(
                             value=False,
