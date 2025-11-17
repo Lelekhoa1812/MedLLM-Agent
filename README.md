@@ -58,10 +58,13 @@ tags:
 - **Inline Mic Experience**: Built-in microphone widget with live recording timer that drops transcripts straight into the chat box
 - **Text-to-Speech**: Voice output generation using Maya1 TTS model (optional, fallback to MCP if unavailable) plus a one-click "Play Response" control for the latest answer
 
-### 🛡️ **Autonomous Guardrails**
-- **Gemini Supervisor Tasks**: Time-aware directives keep MedSwin within token budgets and can fast-track by skipping optional web search
-- **Self-Reflection Loop**: Gemini MCP scores complex answers and appends improvement hints when quality drops
-- **Automatic Citations**: Web-grounded replies include deduplicated source links from the latest search batch
+### 🤝 **MAC Architecture (Multi-Agent Collaboration)**
+- **Gemini Supervisor**: Orchestrates query processing by breaking queries into 2-4 focused sub-topics (JSON format)
+- **MedSwin Specialist**: Executes tasks sequentially, providing concise clinical answers
+- **Search Mode**: Gemini creates 1-4 search strategies → executes ddgs searches (1-2 sources each) → summarizes briefly
+- **RAG Mode**: Gemini brainstorms retrieved documents into 1-4 short contexts for MedSwin decision-making
+- **Clean Output**: All internal thoughts/conversations are logged only; users see only the final answer
+- **Markdown Format**: Final answers use bullet points (tables automatically converted)
 - **Deterministic Mode**: `Disable agentic reasoning` switch runs MedSwin alone for offline-friendly, model-only answers
 
 ### ⚙️ **Advanced Configuration**
@@ -88,11 +91,12 @@ tags:
 ## 🔧 Technical Details
 
 - **Medical Models**: MedSwin/MedSwin-7B-SFT, MedSwin-7B-KD, MedSwin-Merged-TA-SFT-0.7
+- **Architecture**: MAC (Multi-Agent Collaboration) - Gemini Supervisor + MedSwin Specialist
 - **Translation**: Gemini MCP (gemini-2.5-flash-lite)
 - **Document Parsing**: Gemini MCP (PDF, Word, TXT, MD, JSON, XML, CSV)
 - **Speech-to-Text**: Gemini MCP (gemini-2.5-flash-lite)
-- **Summarization**: Gemini MCP (gemini-2.5-flash)
-- **Reasoning & Reflection**: Gemini MCP (gemini-2.5-flash)
+- **Supervisor Tasks**: Gemini MCP (gemini-2.5-flash) - query breakdown, search strategies, RAG brainstorming
+- **MedSwin Execution**: GPU-tagged tasks for efficient inference
 - **Text-to-Speech**: maya-research/maya1 (optional, with MCP fallback)
 - **Embedding Model**: abhinand/MedEmbed-large-v0.1 (domain-tuned medical embeddings)
 - **RAG Framework**: LlamaIndex with hierarchical node parsing and auto-merging retrieval
@@ -146,35 +150,24 @@ MedLLM Agent is designed to support **doctors, clinicians, and medical specialis
 
 ### **Key Enterprise Capabilities**
 
-#### 1. **Autonomous Reasoning & Planning**
-- **Intelligent Query Analysis**: The system autonomously analyzes medical queries to understand:
-  - Query type (diagnosis, treatment, drug information, symptom analysis)
-  - Complexity level (simple, moderate, complex, multi-faceted)
-  - Information requirements and data sources needed
+#### 1. **MAC Architecture (Multi-Agent Collaboration)**
+- **Gemini Supervisor Agent**: 
+  - Breaks user queries into 2-4 focused sub-topics (JSON format)
+  - In search mode: creates 1-4 search strategies, executes ddgs (1-2 sources each), summarizes briefly
+  - In RAG mode: brainstorms retrieved documents into 1-4 concise contexts
+  - All supervisor decisions logged internally, not displayed
   
-- **Multi-Step Execution Planning**: For complex clinical questions, the system:
-  - Breaks down queries into sub-questions
-  - Creates structured execution plans
-  - Determines optimal information gathering strategies
-  - Adapts approach based on query complexity
+- **MedSwin Specialist Agent**:
+  - Executes tasks assigned by Gemini Supervisor (GPU-tagged)
+  - Processes each sub-topic sequentially with focused context
+  - Generates concise, clinically accurate answers
+  - Returns Markdown format with bullet points (tables auto-converted)
 
-#### 2. **Autonomous Decision-Making**
-- **Smart Resource Selection**: The system autonomously decides:
-  - When to use document RAG vs. web search
-  - When both sources are needed for comprehensive answers
-  - Optimal retrieval parameters based on query characteristics
-  
-- **Context-Aware Execution**: Automatically:
-  - Overrides user settings when reasoning suggests better approaches
-  - Combines multiple information sources intelligently
-  - Prioritizes evidence-based medical sources
-
-#### 3. **Self-Reflection & Quality Assurance**
-- **Answer Quality Evaluation**: For complex queries, the system:
-  - Self-evaluates answer completeness and accuracy
-  - Identifies missing information or aspects
-  - Provides improvement suggestions
-  - Ensures high-quality clinical responses
+#### 2. **Clean User Experience**
+- **Internal Thoughts Hidden**: All Gemini-MedSwin conversations logged only
+- **Final Answer Only**: Users see only the polished, final answer
+- **Structured Output**: Markdown bullets, no internal planning tables
+- **Efficient Processing**: Contexts kept brief to respect token limits
 
 ### **Enterprise Use Cases for Medical Specialists**
 
@@ -201,33 +194,30 @@ MedLLM Agent is designed to support **doctors, clinicians, and medical specialis
   - Current medical guidelines
 - **MCP Protocol Benefits**: Standardized, modular tool integration allows easy switching between search providers and enhanced reliability
 
-### **How It Works: Autonomous Reasoning in Action**
+### **How It Works: MAC Architecture in Action**
 
-1. **Query Analysis** → System analyzes: "What are the treatment options for Type 2 diabetes in elderly patients with renal impairment?"
-   - Identifies as complex, multi-faceted query
-   - Determines need for both RAG (patient records) and web search (current guidelines)
-   - Breaks into sub-questions: treatment options, age considerations, renal function impact
+1. **Gemini Supervisor - Query Breakdown** → Analyzes query and breaks into 2-4 sub-topics (JSON):
+   - Example: "What are the treatment options for Type 2 diabetes in elderly patients with renal impairment?"
+   - Creates structured sub-topics: treatment options, age considerations, renal function impact
+   - All planning logged internally, not displayed to user
 
-2. **Autonomous Planning** → Creates execution plan:
-   - Step 1: Language detection/translation
-   - Step 2: RAG retrieval from patient documents
-   - Step 3: Web search for current diabetes treatment guidelines
-   - Step 4: Multi-step reasoning for each sub-question
-   - Step 5: Synthesis of comprehensive answer
-   - Step 6: Self-reflection on answer quality
+2. **Gemini Supervisor - Context Preparation**:
+   - **Search Mode**: Creates 1-4 search strategies → executes ddgs (1-2 sources each) → summarizes briefly
+   - **RAG Mode**: Retrieves documents → brainstorms into 1-4 concise contexts for MedSwin
+   - Contexts kept brief to respect MedSwin token limits
 
-3. **Autonomous Execution** → System executes plan:
-   - Retrieves relevant patient history from documents (parsed via Gemini MCP)
-   - Searches web for latest ADA/ADA-EASD guidelines using MCP tools
-   - Fetches and extracts full content from search results via MCP
-   - Summarizes web content using Gemini MCP
-   - Synthesizes information considering age and renal function
-   - Generates evidence-based treatment recommendations
+3. **MedSwin Specialist - Task Execution** (GPU-tagged):
+   - Executes each sub-topic task sequentially
+   - Receives focused context from Gemini Supervisor
+   - Generates concise clinical answers (Markdown bullets, no tables)
+   - All execution logged internally
 
-4. **Self-Reflection** → Evaluates answer:
-   - Checks completeness (all sub-questions addressed?)
-   - Verifies accuracy (evidence-based?)
-   - Suggests improvements if needed
+4. **Final Answer Assembly**:
+   - Combines all MedSwin task answers
+   - Converts any tables to Markdown bullets
+   - Adds citations if web sources used
+   - Translates back if needed
+   - **Only final answer displayed** - all internal thoughts remain in logs
 
 ### **Enterprise Benefits**
 
