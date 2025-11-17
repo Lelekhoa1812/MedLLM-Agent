@@ -15,7 +15,7 @@ gradio
 # MCP dependencies (required for Gemini MCP)
 mcp
 nest-asyncio
-aistudio-mcp-server
+mcp-server
 # Fallback dependencies (used if MCP is not available)
 requests
 beautifulsoup4
