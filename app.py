@@ -277,6 +277,17 @@ async def get_mcp_session():
         session = ClientSession(read, write)
         await session.__aenter__()
         
+        # Wait a bit for the server to fully initialize
+        await asyncio.sleep(0.5)
+        
+        # Verify the session works by listing tools
+        try:
+            tools = await session.list_tools()
+            logger.info(f"MCP server initialized with {len(tools.tools)} tools")
+        except Exception as e:
+            logger.warning(f"Could not list tools immediately after session creation: {e}")
+            # Continue anyway, might work on first actual call
+        
         # Store both the session and stdio context to keep them alive
         global_mcp_session = session
         global_mcp_stdio_ctx = stdio_ctx
@@ -293,24 +304,44 @@ async def get_mcp_session():
 async def call_gemini_mcp(user_prompt: str, system_prompt: str = None, files: list = None, model: str = None, temperature: float = 0.2) -> str:
     """Call Gemini MCP generate_content tool"""
     if not MCP_AVAILABLE:
+        logger.warning("MCP not available for Gemini call")
         return ""
     
     try:
         session = await get_mcp_session()
         if session is None:
+            logger.warning("Failed to get MCP session for Gemini call")
+            return ""
+        
+        # Retry listing tools if it fails the first time
+        max_retries = 3
+        tools = None
+        for attempt in range(max_retries):
+            try:
+                tools = await session.list_tools()
+                break
+            except Exception as e:
+                if attempt < max_retries - 1:
+                    logger.debug(f"Failed to list tools (attempt {attempt + 1}/{max_retries}), retrying...")
+                    await asyncio.sleep(0.5 * (attempt + 1))  # Exponential backoff
+                else:
+                    logger.error(f"Failed to list MCP tools after {max_retries} attempts: {e}")
+                    return ""
+        
+        if not tools or not hasattr(tools, 'tools'):
+            logger.error("Invalid tools response from MCP server")
             return ""
         
         # Find generate_content tool
-        tools = await session.list_tools()
         generate_tool = None
         for tool in tools.tools:
-            if "generate_content" in tool.name.lower() or "generate" in tool.name.lower():
+            if tool.name == "generate_content" or "generate_content" in tool.name.lower():
                 generate_tool = tool
                 logger.info(f"Found Gemini MCP tool: {tool.name}")
                 break
         
         if not generate_tool:
-            logger.warning("Gemini MCP generate_content tool not found")
+            logger.warning(f"Gemini MCP generate_content tool not found. Available tools: {[t.name for t in tools.tools]}")
             return ""
         
         # Prepare arguments
@@ -326,6 +357,7 @@ async def call_gemini_mcp(user_prompt: str, system_prompt: str = None, files: li
         if temperature is not None:
             arguments["temperature"] = temperature
         
+        logger.debug(f"Calling Gemini MCP tool '{generate_tool.name}' with arguments: {list(arguments.keys())}")
         result = await session.call_tool(generate_tool.name, arguments=arguments)
         
         # Parse result
@@ -333,6 +365,7 @@ async def call_gemini_mcp(user_prompt: str, system_prompt: str = None, files: li
             for item in result.content:
                 if hasattr(item, 'text'):
                     return item.text.strip()
+        logger.warning("Gemini MCP returned empty or invalid result")
         return ""
     except Exception as e:
         logger.error(f"Gemini MCP call error: {e}")
@@ -655,120 +688,95 @@ def translate_text(text: str, target_lang: str = "en", source_lang: str = None) 
     # Return original text if translation fails
     return text
 
-async def search_web_mcp(query: str, max_results: int = 5) -> list:
-    """Search web using MCP tools"""
+async def search_web_gemini(query: str, max_results: int = 5) -> list:
+    """Search web using Gemini MCP generate_content tool"""
     if not MCP_AVAILABLE:
-        logger.warning("MCP not available, falling back to direct search")
-        return search_web_fallback(query, max_results)
+        logger.warning("Gemini MCP not available for web search")
+        return []
     
     try:
-        # Get MCP session
-        session = await get_mcp_session()
-        if session is None:
-            logger.warning("Failed to get MCP session, falling back to direct search")
-            return search_web_fallback(query, max_results)
+        # Use Gemini MCP to search the web and get structured results
+        user_prompt = f"""Search the web for: "{query}"
+
+Return the search results in JSON format with the following structure:
+{{
+    "results": [
+        {{
+            "title": "Result title",
+            "url": "Result URL",
+            "content": "Brief summary or snippet of the content"
+        }}
+    ]
+}}
+
+Return up to {max_results} most relevant results. Focus on medical/health information if applicable."""
         
-        # Call MCP search tool
+        # Use concise system prompt
+        system_prompt = "You are a web search assistant. Search the web and return structured JSON results with titles, URLs, and content summaries."
+        
+        result = await call_gemini_mcp(
+            user_prompt=user_prompt,
+            system_prompt=system_prompt,
+            model=GEMINI_MODEL,  # Use full model for web search
+            temperature=0.3
+        )
+        
+        if not result:
+            logger.warning("Gemini MCP returned empty search results")
+            return []
+        
+        # Parse JSON response
         try:
-            tools = await session.list_tools()
-        except Exception as e:
-            logger.error(f"Failed to list MCP tools: {e}")
-            return search_web_fallback(query, max_results)
+            # Extract JSON from response
+            json_start = result.find('{')
+            json_end = result.rfind('}') + 1
+            if json_start >= 0 and json_end > json_start:
+                data = json.loads(result[json_start:json_end])
+                if isinstance(data, dict) and "results" in data:
+                    web_content = []
+                    for entry in data["results"][:max_results]:
+                        web_content.append({
+                            'title': entry.get('title', ''),
+                            'url': entry.get('url', ''),
+                            'content': entry.get('content', '')
+                        })
+                    logger.info(f"Gemini MCP search returned {len(web_content)} results")
+                    return web_content
+                elif isinstance(data, list):
+                    # Handle case where results are directly in a list
+                    web_content = []
+                    for entry in data[:max_results]:
+                        web_content.append({
+                            'title': entry.get('title', ''),
+                            'url': entry.get('url', entry.get('href', '')),
+                            'content': entry.get('content', entry.get('body', entry.get('snippet', '')))
+                        })
+                    logger.info(f"Gemini MCP search returned {len(web_content)} results")
+                    return web_content
+        except json.JSONDecodeError as e:
+            logger.warning(f"Failed to parse Gemini search results as JSON: {e}")
+            # Fallback: treat as plain text result
+            return [{
+                'title': 'Web Search Result',
+                'url': '',
+                'content': result[:1000]  # Limit content length
+            }]
         
-        search_tool = None
-        for tool in tools.tools:
-            if "search" in tool.name.lower() or "duckduckgo" in tool.name.lower():
-                search_tool = tool
-                logger.info(f"Found MCP search tool: {tool.name}")
-                break
-        
-        if search_tool:
-            # Execute search via MCP
-            try:
-                result = await session.call_tool(
-                    search_tool.name,
-                    arguments={"query": query, "max_results": max_results}
-                )
-            except Exception as e:
-                logger.error(f"Error calling MCP search tool: {e}")
-                return search_web_fallback(query, max_results)
-            
-            # Parse MCP result
-            web_content = []
-            if hasattr(result, 'content') and result.content:
-                for item in result.content:
-                    if hasattr(item, 'text'):
-                        # Parse JSON response from MCP
-                        import json
-                        try:
-                            data = json.loads(item.text)
-                            if isinstance(data, list):
-                                for entry in data[:max_results]:
-                                    web_content.append({
-                                        'title': entry.get('title', ''),
-                                        'url': entry.get('url', entry.get('href', '')),
-                                        'content': entry.get('body', entry.get('snippet', entry.get('content', '')))
-                                    })
-                            elif isinstance(data, dict):
-                                web_content.append({
-                                    'title': data.get('title', ''),
-                                    'url': data.get('url', data.get('href', '')),
-                                    'content': data.get('body', data.get('snippet', data.get('content', '')))
-                                })
-                        except json.JSONDecodeError:
-                            # If not JSON, treat as plain text
-                            web_content.append({
-                                'title': '',
-                                'url': '',
-                                'content': item.text
-                            })
-            
-            # If MCP search didn't return results, try fetching content via MCP fetch tool
-            if web_content:
-                # Try to fetch full content for each result using MCP fetch tool
-                fetch_tool = None
-                for tool in tools.tools:
-                    if "fetch" in tool.name.lower() or "scrape" in tool.name.lower() or "get" in tool.name.lower():
-                        fetch_tool = tool
-                        logger.info(f"Found MCP fetch tool: {tool.name}")
-                        break
-                
-                if fetch_tool:
-                    for item in web_content[:3]:  # Fetch content for top 3 results
-                        if not item.get('url'):
-                            continue
-                        try:
-                            fetch_result = await session.call_tool(
-                                fetch_tool.name,
-                                arguments={"url": item['url']}
-                            )
-                            if hasattr(fetch_result, 'content') and fetch_result.content:
-                                for content_item in fetch_result.content:
-                                    if hasattr(content_item, 'text'):
-                                        # Extract text content
-                                        full_text = content_item.text
-                                        if len(full_text) > 1000:
-                                            full_text = full_text[:1000] + "..."
-                                        item['content'] = item.get('content', '') + "\n" + full_text[:500]
-                        except Exception as e:
-                            logger.debug(f"Could not fetch content for {item['url']}: {e}")
-                            continue
-            
-            if web_content:
-                logger.info(f"MCP search returned {len(web_content)} results")
-                return web_content
-            else:
-                logger.warning("MCP search returned no results, falling back to direct search")
-                return search_web_fallback(query, max_results)
-        else:
-            logger.warning("MCP search tool not found, falling back to direct search")
-            return search_web_fallback(query, max_results)
-            
+        return []
     except Exception as e:
-        logger.error(f"MCP web search error: {e}, falling back to direct search")
+        logger.error(f"Gemini MCP web search error: {e}")
         import traceback
         logger.debug(traceback.format_exc())
-        return search_web_fallback(query, max_results)
+        return []
+
+async def search_web_mcp(query: str, max_results: int = 5) -> list:
+    """Search web using Gemini MCP (wrapper for compatibility)"""
+    results = await search_web_gemini(query, max_results)
+    if results:
+        return results
+    # Fallback to direct search only if Gemini MCP fails
+    logger.warning("Gemini MCP web search failed, falling back to direct search")
+    return search_web_fallback(query, max_results)
 
 def search_web_fallback(query: str, max_results: int = 5) -> list:
     """Fallback web search using DuckDuckGo directly (when MCP is not available)"""
