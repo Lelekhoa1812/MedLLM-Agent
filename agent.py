@@ -119,7 +119,8 @@ def prepare_gemini_files(files: list) -> list:
 @app.list_tools()
 async def list_tools() -> list[Tool]:
     """List available tools"""
-    return [
+    logger.info("📋 MCP server received list_tools request")
+    tools = [
         Tool(
             name="generate_content",
             description="Generate content using Gemini AI. Supports text generation, translation, summarization, document parsing, and audio transcription.",
@@ -159,6 +160,8 @@ async def list_tools() -> list[Tool]:
             }
         )
     ]
+    logger.info(f"✅ MCP server returning {len(tools)} tools")
+    return tools
 
 @app.call_tool()
 async def call_tool(name: str, arguments: dict) -> Sequence[TextContent | ImageContent | EmbeddedResource]:
@@ -287,14 +290,11 @@ async def main():
             logger.info("✅ MCP server stdio streams ready, starting server...")
             
             # Run the server - this handles initialization automatically
-            # The create_initialization_options() provides server capabilities
-            init_options = app.create_initialization_options()
-            logger.info(f"MCP server initialization options: {init_options}")
-            
+            # The app.run() method handles the initialization handshake internally
+            # We don't need to pass initialization options - the SDK handles it
             await app.run(
                 streams[0],  # read_stream
-                streams[1],  # write_stream
-                init_options
+                streams[1]   # write_stream
             )
     except Exception as e:
         logging.getLogger("root").setLevel(original_root_level)

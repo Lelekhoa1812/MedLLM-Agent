@@ -277,20 +277,23 @@ async def get_mcp_session():
         # The __aenter__() method automatically handles the initialization handshake
         session = ClientSession(read, write)
         
-        # Wait a moment for the server process to start
-        await asyncio.sleep(1.0)
+        # Wait longer for the server process to fully start
+        # The server needs time to: start Python, import modules, initialize Gemini client, start MCP server
+        logger.info("⏳ Waiting for MCP server process to start...")
+        await asyncio.sleep(3.0)  # Increased wait for server process startup
         
         try:
             # Initialize the session (this sends initialize request and waits for response)
+            logger.info("🔄 Initializing MCP session...")
             await session.__aenter__()
-            logger.info("⏳ MCP session initialized, verifying tools...")
+            logger.info("✅ MCP session initialized, verifying tools...")
         except Exception as e:
             logger.warning(f"MCP session initialization had an issue (may be expected): {e}")
             # Continue anyway - the session might still work
         
         # Wait longer for the server to be fully ready after initialization
         # The server needs time to process the initialization and be ready for requests
-        await asyncio.sleep(2.5)
+        await asyncio.sleep(2.0)  # Wait after initialization
         
         # Verify the session works by listing tools with retries
         # This confirms the server is ready to handle requests
