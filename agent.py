@@ -290,34 +290,37 @@ async def main():
             logging.getLogger("root").setLevel(original_root_level)
             logger.info("✅ MCP server stdio streams ready, starting server...")
             
-            # Create initialization options with server capabilities
-            # The Server class should provide its capabilities automatically
+            # Create initialization options
+            # The Server class will automatically provide its capabilities based on
+            # the registered @app.list_tools() and @app.call_tool() handlers
             try:
-                # Try to get capabilities from the server using get_capabilities method
+                # Try to get capabilities from the server if the method exists
                 if hasattr(app, 'get_capabilities'):
-                    # Try with NotificationOptions if available
                     try:
+                        # Try with NotificationOptions if available
                         from mcp.server.lowlevel.server import NotificationOptions
                         server_capabilities = app.get_capabilities(
                             notification_options=NotificationOptions(),
                             experimental_capabilities={}
                         )
-                    except ImportError:
+                    except (ImportError, AttributeError, TypeError):
                         # Fallback: try without NotificationOptions
-                        server_capabilities = app.get_capabilities()
+                        try:
+                            server_capabilities = app.get_capabilities()
+                        except:
+                            # If get_capabilities doesn't work, create minimal capabilities
+                            server_capabilities = {}
                 else:
-                    # Fallback: create basic capabilities structure
-                    server_capabilities = {
-                        "tools": {}
-                    }
+                    # Server will provide capabilities automatically, use empty dict
+                    server_capabilities = {}
             except Exception as e:
-                logger.warning(f"Could not get server capabilities: {e}, using defaults")
-                # Fallback: create basic capabilities
-                server_capabilities = {
-                    "tools": {}
-                }
+                logger.debug(f"Could not get server capabilities: {e}, server will provide defaults")
+                # Server will handle capabilities automatically
+                server_capabilities = {}
             
             # Create initialization options
+            # The server_name and server_version are required
+            # Capabilities will be automatically determined by the Server from registered handlers
             init_options = InitializationOptions(
                 server_name="gemini-mcp-server",
                 server_version="1.0.0",
