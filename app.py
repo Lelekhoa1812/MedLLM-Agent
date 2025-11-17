@@ -200,12 +200,13 @@ global_mcp_session = None
 global_mcp_stdio_ctx = None  # Store stdio context to keep it alive
 global_mcp_lock = threading.Lock()  # Lock for thread-safe session access
 # MCP server configuration via environment variables
-# Gemini MCP server: mcp-server (PyPI package)
-# Install with: pip install mcp-server
-# Example: MCP_SERVER_COMMAND="python" MCP_SERVER_ARGS="-m mcp_server"
-# Or use npx for Node.js version: MCP_SERVER_COMMAND="npx" MCP_SERVER_ARGS="-y @modelcontextprotocol/server-gemini"
-MCP_SERVER_COMMAND = os.environ.get("MCP_SERVER_COMMAND", "python")
-MCP_SERVER_ARGS = os.environ.get("MCP_SERVER_ARGS", "-m mcp_server").split() if os.environ.get("MCP_SERVER_ARGS") else ["-m", "mcp_server"]
+# Gemini MCP server: Use Node.js version via npx (recommended)
+# No installation needed - npx will download automatically
+# Example: MCP_SERVER_COMMAND="npx" MCP_SERVER_ARGS="-y @modelcontextprotocol/server-gemini"
+# Or use Python version if available: MCP_SERVER_COMMAND="python" MCP_SERVER_ARGS="-m mcp_server_gemini"
+# Make sure GEMINI_API_KEY is set in environment variables
+MCP_SERVER_COMMAND = os.environ.get("MCP_SERVER_COMMAND", "npx")
+MCP_SERVER_ARGS = os.environ.get("MCP_SERVER_ARGS", "-y @modelcontextprotocol/server-gemini").split() if os.environ.get("MCP_SERVER_ARGS") else ["-y", "@modelcontextprotocol/server-gemini"]
 
 async def get_mcp_session():
     """Get or create MCP client session with proper context management"""
@@ -238,10 +239,28 @@ async def get_mcp_session():
     
     # Create new session using correct MCP SDK pattern
     try:
+        # Prepare environment variables for MCP server
+        mcp_env = os.environ.copy()
+        if GEMINI_API_KEY:
+            mcp_env["GEMINI_API_KEY"] = GEMINI_API_KEY
+        else:
+            logger.warning("GEMINI_API_KEY not set in environment. Gemini MCP features may not work.")
+        
+        # Add other Gemini MCP configuration if set
+        if os.environ.get("GEMINI_MODEL"):
+            mcp_env["GEMINI_MODEL"] = os.environ.get("GEMINI_MODEL")
+        if os.environ.get("GEMINI_TIMEOUT"):
+            mcp_env["GEMINI_TIMEOUT"] = os.environ.get("GEMINI_TIMEOUT")
+        if os.environ.get("GEMINI_MAX_OUTPUT_TOKENS"):
+            mcp_env["GEMINI_MAX_OUTPUT_TOKENS"] = os.environ.get("GEMINI_MAX_OUTPUT_TOKENS")
+        if os.environ.get("GEMINI_TEMPERATURE"):
+            mcp_env["GEMINI_TEMPERATURE"] = os.environ.get("GEMINI_TEMPERATURE")
+        
         logger.info(f"Creating MCP client session with command: {MCP_SERVER_COMMAND} {MCP_SERVER_ARGS}")
         server_params = StdioServerParameters(
             command=MCP_SERVER_COMMAND,
-            args=MCP_SERVER_ARGS
+            args=MCP_SERVER_ARGS,
+            env=mcp_env
         )
         
         # Correct MCP SDK usage: stdio_client is an async context manager
