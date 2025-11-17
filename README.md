@@ -27,7 +27,7 @@ tags:
 ### 📄 **Document RAG (Retrieval-Augmented Generation)**
 - Upload medical documents (PDF, Word, TXT, MD, JSON, XML, CSV) and get answers based on your uploaded content
 - Document parsing powered by Gemini MCP for accurate text extraction
-- Hierarchical document indexing with auto-merging retrieval
+- Hierarchical document indexing with auto-merging retrieval for comprehensive context
 - Mitigates hallucination by grounding responses in your documents
 - Toggle RAG on/off - when disabled, provides concise clinical answers without document context
 
@@ -40,9 +40,9 @@ tags:
 - **Enriches Context**: Combines document RAG + web sources for comprehensive answers
 
 ### 🧠 **MedSwin Medical Specialist Models**
-- **MedSwin SFT** (default) - Supervised Fine-Tuned model
+- **MedSwin TA** (default) - Task-Aware merged model
+- **MedSwin SFT** - Supervised Fine-Tuned model
 - **MedSwin KD** - Knowledge Distillation model  
-- **MedSwin TA** - Task-Aware merged model
 - Models download on-demand for efficient resource usage
 - Fine-tuned on MedAlpaca-7B for medical domain expertise
 
@@ -54,9 +54,8 @@ tags:
 - Powered by Gemini MCP for translation
 
 ### 🎤 **Voice Features**
-- **Speech-to-Text**: Microphone icon for voice input transcription using Gemini MCP
-- **Text-to-Speech**: Speaker icon in responses to generate voice output using Maya1 TTS model
-- Speech-to-text powered by Gemini MCP for accurate transcription
+- **Speech-to-Text**: Voice input transcription using Gemini MCP
+- **Text-to-Speech**: Voice output generation using Maya1 TTS model (optional, fallback to MCP if unavailable)
 
 ### ⚙️ **Advanced Configuration**
 - Customizable generation parameters (temperature, top-p, top-k)
@@ -81,94 +80,71 @@ tags:
 ## 🔧 Technical Details
 
 - **Medical Models**: MedSwin/MedSwin-7B-SFT, MedSwin-7B-KD, MedSwin-Merged-TA-SFT-0.7
-- **Translation**: Gemini MCP (gemini-2.5-flash-lite for simple tasks)
-- **Document Parsing**: Gemini MCP (supports PDF, Word, TXT, MD, JSON, XML, CSV)
+- **Translation**: Gemini MCP (gemini-2.5-flash-lite)
+- **Document Parsing**: Gemini MCP (PDF, Word, TXT, MD, JSON, XML, CSV)
 - **Speech-to-Text**: Gemini MCP (gemini-2.5-flash-lite)
-- **Summarization**: Gemini MCP (gemini-2.5-flash for complex tasks)
+- **Summarization**: Gemini MCP (gemini-2.5-flash)
 - **Reasoning & Reflection**: Gemini MCP (gemini-2.5-flash)
-- **Text-to-Speech**: maya-research/maya1
+- **Text-to-Speech**: maya-research/maya1 (optional, with MCP fallback)
 - **Embedding Model**: abhinand/MedEmbed-large-v0.1 (domain-tuned medical embeddings)
-- **RAG Framework**: LlamaIndex with hierarchical node parsing
-- **Web Search**: Model Context Protocol (MCP) tools with automatic fallback to DuckDuckGo
-- **MCP Client**: Python MCP SDK for standardized tool integration
-- **Gemini MCP Server**: mcp-server via MCP protocol
+- **RAG Framework**: LlamaIndex with hierarchical node parsing and auto-merging retrieval
+- **Web Search**: MCP tools with automatic fallback to DuckDuckGo
+- **MCP Server**: Bundled Python-based Gemini MCP server (agent.py)
 
 ## 📋 Requirements
 
 See `requirements.txt` for full dependency list. Key dependencies:
-- **MCP Integration**: `mcp`, `nest-asyncio` (primary - for MCP protocol support)
-- **Fallback Dependencies**: `requests`, `beautifulsoup4` (used when MCP is not available)
-- **Core ML**: `transformers`, `torch`
-- **RAG Framework**: `llama-index`
-- **Utilities**: `langdetect`, `gradio`, `spaces`
+- **MCP Integration**: `mcp`, `nest-asyncio`, `google-genai` (for Gemini MCP server)
+- **Fallback Dependencies**: `requests`, `beautifulsoup4`, `ddgs` (used when MCP web search unavailable)
+- **Core ML**: `transformers`, `torch`, `accelerate`
+- **RAG Framework**: `llama-index`, `llama_index.llms.huggingface`, `llama_index.embeddings.huggingface`
+- **Utilities**: `langdetect`, `gradio`, `spaces`, `soundfile`
+- **TTS**: Optional - `TTS` package (voice features work with MCP fallback if unavailable)
 
 ### 🔌 MCP Configuration
 
-The application uses Gemini MCP (Model Context Protocol) for translation, document parsing, transcription, and summarization. Configure Gemini MCP server via environment variables:
+The application uses a bundled Gemini MCP server (agent.py) for translation, document parsing, transcription, and summarization. Configure via environment variables:
 
 ```bash
-# Gemini MCP Server (required)
+# Required: Gemini API Key
 export GEMINI_API_KEY="your-gemini-api-key"
 
-# Gemini MCP Server Configuration
+# Optional: Gemini MCP Server Configuration (defaults to bundled agent.py)
 export MCP_SERVER_COMMAND="python"
-export MCP_SERVER_ARGS="-m mcp_server"
+export MCP_SERVER_ARGS="/path/to/agent.py"  # Default: bundled agent.py
 
-# Optional Gemini Configuration
-export GEMINI_MODEL="gemini-2.5-flash"  # For harder tasks (default)
-export GEMINI_MODEL_LITE="gemini-2.5-flash-lite"  # For parsing and simple tasks (default)
+# Optional: Gemini Model Configuration
+export GEMINI_MODEL="gemini-2.5-flash"  # For complex tasks (default)
+export GEMINI_MODEL_LITE="gemini-2.5-flash-lite"  # For simple tasks (default)
 export GEMINI_TIMEOUT=300000  # Request timeout in milliseconds (default: 5 minutes)
 export GEMINI_MAX_OUTPUT_TOKENS=8192  # Maximum output tokens (default)
-export GEMINI_MAX_FILES=10  # Maximum number of files per request (default)
-export GEMINI_MAX_TOTAL_FILE_SIZE=50  # Maximum total file size in MB (default)
 export GEMINI_TEMPERATURE=0.2  # Temperature for generation 0-2 (default: 0.2)
 ```
 
-**Available Gemini MCP Tools:**
-- **Translation**: Multi-language translation using Gemini MCP (gemini-2.5-flash-lite)
-- **Document Parsing**: Extract text from PDF, Word, and other documents using Gemini MCP
-- **Speech-to-Text**: Audio transcription using Gemini MCP (gemini-2.5-flash-lite)
-- **Summarization**: Web content summarization using Gemini MCP (gemini-2.5-flash)
-- **Reasoning & Reflection**: Query analysis and answer quality evaluation using Gemini MCP
+**Setup Steps:**
 
-**Supported File Types for Document Parsing:**
-- Documents: PDF, DOC, DOCX (treated as images, one page = one image)
-- Text: TXT, MD, JSON, XML, CSV
-- Images: JPG, JPEG, PNG, GIF, WebP, SVG, BMP, TIFF
-- Audio: MP3, WAV, AIFF, AAC, OGG, FLAC (up to 15MB per file)
-- Video: MP4, AVI, MOV, WEBM, FLV, MPG, WMV (up to 10 files per request)
-
-1. **Install MCP Python SDK** (already in requirements.txt):
+1. **Install Dependencies** (already in requirements.txt):
    ```bash
-   pip install mcp nest-asyncio
+   pip install mcp nest-asyncio google-genai
    ```
 
-2. **Install Gemini MCP Server**:
-   ```bash
-   # Install Python package
-   pip install mcp-server
-   ```
-
-3. **Get Gemini API Key**:
+2. **Get Gemini API Key**:
    - Visit [Google AI Studio](https://aistudio.google.com/) to get your API key
-   - Set it as an environment variable: `export GEMINI_API_KEY="your-api-key"`
+   - Set it: `export GEMINI_API_KEY="your-api-key"`
 
-4. **Configure via Environment Variables**:
-   ```bash
-   export GEMINI_API_KEY="your-gemini-api-key"
-   export MCP_SERVER_COMMAND="python"
-   export MCP_SERVER_ARGS="-m mcp_server"
-   ```
+3. **Run the Application**:
+   - The bundled MCP server (agent.py) will be used automatically
+   - No additional MCP server installation required
 
-**Note**: The application requires Gemini MCP for translation, document parsing, transcription, and summarization. Web search functionality still supports fallback to direct library calls if MCP is not configured.
+**Note**: The application requires Gemini MCP for translation, document parsing, transcription, and summarization. Web search supports fallback to direct DuckDuckGo API if MCP web search tools are unavailable.
 
 ## 🎯 Use Cases
 
-- Medical document Q&A
-- Clinical information retrieval
-- Medical research assistance
-- Multi-language medical consultations
-- Evidence-based medical answers
+- **Clinical Decision Support**: Evidence-based answers from documents and current medical literature
+- **Medical Document Q&A**: Query uploaded patient records, research papers, and clinical guidelines
+- **Multi-Language Consultations**: Automatic translation for international patient care
+- **Research Assistance**: Synthesize information from multiple medical sources
+- **Drug Information**: Comprehensive drug information with interaction analysis
 
 ## 🏥 Enterprise-Level Clinical Decision Support
 
@@ -274,16 +250,15 @@ MedLLM Agent is designed to support **doctors, clinicians, and medical specialis
 
 ### **Implementation in Clinical Settings**
 
-**Hospital Systems**: Deploy for clinical decision support, integrating with EMR systems and institutional medical libraries.
-
-**Specialty Clinics**: Customize for specific medical specialties by uploading specialty-specific documents and guidelines.
-
-**Medical Education**: Support medical training and education with comprehensive, evidence-based answers.
-
-**Research Institutions**: Accelerate medical research by synthesizing information from multiple sources.
+- **Hospital Systems**: Clinical decision support with EMR integration and institutional medical libraries
+- **Specialty Clinics**: Customize with specialty-specific documents and guidelines
+- **Medical Education**: Comprehensive, evidence-based answers for training and education
+- **Research Institutions**: Accelerate research by synthesizing information from multiple sources
 
 ---
 
-**Note**: This system is designed to **assist** medical professionals with information retrieval and synthesis. It does not replace clinical judgment. All medical decisions should be made by qualified healthcare professionals who consider the full clinical context, patient-specific factors, and their professional expertise.
+**⚠️ Important Disclaimer**: This system is designed to **assist** medical professionals with information retrieval and synthesis. It does not replace clinical judgment. All medical decisions must be made by qualified healthcare professionals who consider the full clinical context, patient-specific factors, and their professional expertise.
 
-> Introduction: A medical app for MCP-1st-Birthday hackathon, integrating MCP searcher and document RAG with autonomous reasoning, planning, and execution capabilities for enterprise-level clinical decision support.
+---
+
+> **Built for MCP-1st-Birthday Hackathon**: Enterprise-level clinical decision support system integrating MCP protocol, document RAG, and autonomous reasoning capabilities.
