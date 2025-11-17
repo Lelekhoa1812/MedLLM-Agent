@@ -156,9 +156,13 @@ def generate_with_medswin(
     # Move inputs to the correct device
     inputs = {k: v.to(device) for k, v in inputs.items()}
     
+    # Log tokenization info for debugging
+    logger.debug(f"Tokenized prompt: {inputs['input_ids'].shape[1]} tokens on device {device}")
+    
     # Prepare generation kwargs - use standard structure
+    # Only include input_ids and attention_mask (standard for LLaMA models)
     generation_kwargs = {
-        **inputs,  # Unpack input_ids and attention_mask
+        "input_ids": inputs["input_ids"],
         "max_new_tokens": max_new_tokens,
         "temperature": temperature,
         "top_p": top_p,
@@ -171,9 +175,14 @@ def generate_with_medswin(
         "pad_token_id": pad_token_id
     }
     
+    # Add attention_mask if it exists
+    if "attention_mask" in inputs:
+        generation_kwargs["attention_mask"] = inputs["attention_mask"]
+    
     # Run generation on GPU with torch.no_grad() for efficiency
     with torch.no_grad():
         try:
+            logger.debug(f"Starting generation with max_new_tokens={max_new_tokens}, temperature={temperature}")
             medical_model_obj.generate(**generation_kwargs)
         except Exception as e:
             logger.error(f"Error during generation: {e}")
