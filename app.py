@@ -274,30 +274,47 @@ async def get_mcp_session():
         read, write = await stdio_ctx.__aenter__()
         
         # Create ClientSession from the streams
+        # The __aenter__() method automatically handles the initialization handshake
         session = ClientSession(read, write)
-        await session.__aenter__()
         
-        # Wait for the server to fully initialize
-        # The server needs time to start up and be ready
-        # Increased wait time and retries for better reliability
-        logger.info("⏳ Waiting for MCP server to initialize...")
-        await asyncio.sleep(2.0)  # Initial wait
+        # Wait a moment for the server process to start
+        await asyncio.sleep(1.0)
+        
+        try:
+            # Initialize the session (this sends initialize request and waits for response)
+            await session.__aenter__()
+            logger.info("⏳ MCP session initialized, verifying tools...")
+        except Exception as e:
+            logger.warning(f"MCP session initialization had an issue (may be expected): {e}")
+            # Continue anyway - the session might still work
+        
+        # Wait a bit more for the server to be fully ready after initialization
+        await asyncio.sleep(1.5)
         
         # Verify the session works by listing tools with retries
-        max_init_retries = 15
+        # This confirms the server is ready to handle requests
+        max_init_retries = 10
         tools_listed = False
         tools = None
         for init_attempt in range(max_init_retries):
             try:
                 tools = await session.list_tools()
                 if tools and hasattr(tools, 'tools') and len(tools.tools) > 0:
-                    logger.info(f"✅ MCP server initialized with {len(tools.tools)} tools: {[t.name for t in tools.tools]}")
+                    logger.info(f"✅ MCP server ready with {len(tools.tools)} tools: {[t.name for t in tools.tools]}")
                     tools_listed = True
                     break
             except Exception as e:
-                if init_attempt < max_init_retries - 1:
-                    wait_time = 0.5 * (init_attempt + 1)  # Progressive wait: 0.5s, 1s, 1.5s...
-                    logger.debug(f"Initialization attempt {init_attempt + 1}/{max_init_retries} failed, waiting {wait_time}s before retry...")
+                error_str = str(e).lower()
+                # Ignore initialization-related errors during the handshake phase
+                if "initialization" in error_str or "before initialization" in error_str:
+                    if init_attempt < max_init_retries - 1:
+                        wait_time = 0.5 * (init_attempt + 1)  # Progressive wait: 0.5s, 1s, 1.5s...
+                        logger.debug(f"Server still initializing (attempt {init_attempt + 1}/{max_init_retries}), waiting {wait_time}s...")
+                        await asyncio.sleep(wait_time)
+                        continue
+                elif init_attempt < max_init_retries - 1:
+                    wait_time = 0.5 * (init_attempt + 1)
+                    logger.debug(f"Tool listing attempt {init_attempt + 1}/{max_init_retries} failed: {e}, waiting {wait_time}s...")
                     await asyncio.sleep(wait_time)
                 else:
                     logger.error(f"❌ Could not list tools after {max_init_retries} attempts: {e}")
@@ -398,8 +415,8 @@ async def call_agent(user_prompt: str, system_prompt: str = None, files: list = 
         if temperature is not None:
             arguments["temperature"] = temperature
         
-        logger.info(f"🔧 Calling Gemini MCP tool '{generate_tool.name}' for: {user_prompt[:100]}...")
-        logger.info(f"📋 MCP Arguments: model={model}, temperature={temperature}, files={len(files) if files else 0}")
+        logger.info(f"🔧 [MCP] Calling Gemini MCP tool '{generate_tool.name}' for: {user_prompt[:100]}...")
+        logger.info(f"📋 [MCP] Arguments: model={model}, temperature={temperature}, files={len(files) if files else 0}")
         result = await session.call_tool(generate_tool.name, arguments=arguments)
         
         # Parse result
@@ -407,9 +424,9 @@ async def call_agent(user_prompt: str, system_prompt: str = None, files: list = 
             for item in result.content:
                 if hasattr(item, 'text'):
                     response_text = item.text.strip()
-                    logger.info(f"✅ Gemini MCP returned response ({len(response_text)} chars)")
+                    logger.info(f"✅ [MCP] Gemini MCP returned response ({len(response_text)} chars)")
                     return response_text
-        logger.warning("⚠️ Gemini MCP returned empty or invalid result")
+        logger.warning("⚠️ [MCP] Gemini MCP returned empty or invalid result")
         return ""
     except Exception as e:
         logger.error(f"Gemini MCP call error: {e}")
@@ -770,6 +787,7 @@ async def search_web_mcp_tool(query: str, max_results: int = 5) -> list:
         
         if search_tool:
             try:
+                logger.info(f"🔍 [MCP] Using web search MCP tool '{search_tool.name}' for: {query[:100]}...")
                 # Call the search tool
                 result = await session.call_tool(
                     search_tool.name,
@@ -813,7 +831,7 @@ async def search_web_mcp_tool(query: str, max_results: int = 5) -> list:
                                 })
                 
                 if web_content:
-                    logger.info(f"Web search MCP returned {len(web_content)} results")
+                    logger.info(f"✅ [MCP] Web search MCP tool returned {len(web_content)} results")
                     return web_content
             except Exception as e:
                 logger.error(f"Error calling web search MCP tool: {e}")
@@ -834,11 +852,12 @@ async def search_web_mcp(query: str, max_results: int = 5) -> list:
     # If no web search MCP tool available, use direct search (ddgs)
     # Note: Gemini MCP doesn't have web search capability, so we use direct API
     # The results will then be summarized using Gemini MCP
-    logger.info("ℹ️ No web search MCP tool found, using direct DuckDuckGo search (results will be summarized with Gemini MCP)")
+    logger.info("ℹ️ [Direct API] No web search MCP tool found, using direct DuckDuckGo search (results will be summarized with Gemini MCP)")
     return search_web_fallback(query, max_results)
 
 def search_web_fallback(query: str, max_results: int = 5) -> list:
     """Fallback web search using DuckDuckGo directly (when MCP is not available)"""
+    logger.info(f"🔍 [Direct API] Performing web search using DuckDuckGo API for: {query[:100]}...")
     # Always import here to ensure availability
     try:
         from ddgs import DDGS
@@ -893,9 +912,10 @@ def search_web_fallback(query: str, max_results: int = 5) -> list:
                 except Exception as e:
                     logger.error(f"Error processing search result: {e}")
                     continue
+            logger.info(f"✅ [Direct API] Web search completed: {len(web_content)} results")
             return web_content
     except Exception as e:
-        logger.error(f"Web search error: {e}")
+        logger.error(f"❌ [Direct API] Web search error: {e}")
         return []
 
 def search_web(query: str, max_results: int = 5) -> list:
@@ -933,11 +953,12 @@ def search_web(query: str, max_results: int = 5) -> list:
             logger.error(f"Error running async MCP search: {e}")
     
     # Only use ddgs fallback if MCP is not available or returned no results
-    logger.warning("Falling back to direct ddgs search (MCP unavailable or returned no results)")
+    logger.info("ℹ️ [Direct API] Falling back to direct DuckDuckGo search (MCP unavailable or returned no results)")
     return search_web_fallback(query, max_results)
 
 async def summarize_web_content_gemini(content_list: list, query: str) -> str:
     """Summarize web search results using Gemini MCP"""
+    logger.info(f"📝 [MCP] Summarizing {len(content_list)} web search results using Gemini MCP...")
     combined_content = "\n\n".join([f"Source: {item['title']}\n{item['content']}" for item in content_list[:3]])
     
     user_prompt = f"""Summarize the following web search results related to the query: "{query}"
@@ -958,6 +979,11 @@ Summary:"""
         model=GEMINI_MODEL,  # Use full model for summarization
         temperature=0.5
     )
+    
+    if result:
+        logger.info(f"✅ [MCP] Web content summarized successfully using Gemini MCP ({len(result)} chars)")
+    else:
+        logger.warning("⚠️ [MCP] Gemini MCP summarization returned empty result")
     
     return result.strip()
 
@@ -1012,6 +1038,7 @@ def get_llm_for_rag(temperature=0.7, max_new_tokens=256, top_p=0.95, top_k=50):
 
 async def autonomous_reasoning_gemini(query: str) -> dict:
     """Autonomous reasoning using Gemini MCP"""
+    logger.info(f"🧠 [MCP] Analyzing query with Gemini MCP: {query[:100]}...")
     reasoning_prompt = f"""Analyze this medical query and provide structured reasoning:
 
 Query: "{query}"
@@ -1086,17 +1113,17 @@ def autonomous_reasoning(query: str, history: list) -> dict:
         }
     
     try:
-        logger.info("🤔 Using Gemini MCP for autonomous reasoning...")
+        logger.info("🤔 [MCP] Using Gemini MCP for autonomous reasoning...")
         loop = asyncio.get_event_loop()
         if loop.is_running():
             try:
                 import nest_asyncio
                 reasoning = nest_asyncio.run(autonomous_reasoning_gemini(query))
                 if reasoning and reasoning.get("query_type") != "general_info":  # Check if we got real reasoning
-                    logger.info(f"✅ Gemini MCP reasoning successful: {reasoning.get('query_type')}, complexity: {reasoning.get('complexity')}")
+                    logger.info(f"✅ [MCP] Gemini MCP reasoning successful: {reasoning.get('query_type')}, complexity: {reasoning.get('complexity')}")
                     return reasoning
                 else:
-                    logger.warning("⚠️ Gemini MCP returned fallback reasoning, using it anyway")
+                    logger.warning("⚠️ [MCP] Gemini MCP returned fallback reasoning, using it anyway")
                     return reasoning
             except Exception as e:
                 logger.error(f"❌ Error in nested async reasoning: {e}")
@@ -1105,10 +1132,10 @@ def autonomous_reasoning(query: str, history: list) -> dict:
         else:
             reasoning = loop.run_until_complete(autonomous_reasoning_gemini(query))
             if reasoning and reasoning.get("query_type") != "general_info":
-                logger.info(f"✅ Gemini MCP reasoning successful: {reasoning.get('query_type')}, complexity: {reasoning.get('complexity')}")
+                logger.info(f"✅ [MCP] Gemini MCP reasoning successful: {reasoning.get('query_type')}, complexity: {reasoning.get('complexity')}")
                 return reasoning
             else:
-                logger.warning("⚠️ Gemini MCP returned fallback reasoning, using it anyway")
+                logger.warning("⚠️ [MCP] Gemini MCP returned fallback reasoning, using it anyway")
                 return reasoning
     except Exception as e:
         logger.error(f"❌ Gemini MCP reasoning error: {e}")
@@ -1615,16 +1642,16 @@ def stream_chat(
     web_sources = []
     web_urls = []  # Store URLs for citations
     if final_use_web_search:
-        logger.info("🌐 Performing web search (MCP if available, else direct API)...")
+        logger.info("🌐 Performing web search (will use Gemini MCP for summarization)...")
         web_results = search_web(message, max_results=5)
         if web_results:
             logger.info(f"📊 Found {len(web_results)} web search results, now summarizing with Gemini MCP...")
             web_summary = summarize_web_content(web_results, message)
             if web_summary and len(web_summary) > 50:  # Check if we got a real summary
-                logger.info(f"✅ Gemini MCP summarization successful ({len(web_summary)} chars)")
+                logger.info(f"✅ [MCP] Gemini MCP summarization successful ({len(web_summary)} chars)")
                 web_context = f"\n\nAdditional Web Sources (summarized with Gemini MCP):\n{web_summary}"
             else:
-                logger.warning("⚠️ Gemini MCP summarization failed or returned empty, using raw results")
+                logger.warning("⚠️ [MCP] Gemini MCP summarization failed or returned empty, using raw results")
                 # Fallback: use first result's content
                 web_context = f"\n\nAdditional Web Sources:\n{web_results[0].get('content', '')[:500]}"
             web_sources = [r['title'] for r in web_results[:3]]

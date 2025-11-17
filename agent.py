@@ -34,6 +34,13 @@ except ImportError:
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
+# Suppress warnings from MCP SDK during initialization
+# These warnings are expected during the initialization handshake
+mcp_logger = logging.getLogger("mcp")
+mcp_logger.setLevel(logging.ERROR)  # Only show errors, suppress warnings during init
+root_logger = logging.getLogger("root")
+root_logger.setLevel(logging.ERROR)  # Suppress root logger warnings during init
+
 # Initialize Gemini
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 if not GEMINI_API_KEY:
@@ -268,12 +275,26 @@ async def main():
     # Use stdio_server from mcp.server.stdio
     from mcp.server.stdio import stdio_server
     
-    async with stdio_server() as streams:
-        await app.run(
-            streams[0],  # read_stream
-            streams[1],  # write_stream
-            app.create_initialization_options()
-        )
+    # Suppress root logger warnings during initialization
+    # These are expected during the MCP initialization handshake
+    original_root_level = logging.getLogger("root").level
+    logging.getLogger("root").setLevel(logging.ERROR)
+    
+    try:
+        async with stdio_server() as streams:
+            # Restore logging after initialization
+            logging.getLogger("root").setLevel(original_root_level)
+            logger.info("✅ MCP server initialized and ready")
+            
+            await app.run(
+                streams[0],  # read_stream
+                streams[1],  # write_stream
+                app.create_initialization_options()
+            )
+    except Exception as e:
+        logging.getLogger("root").setLevel(original_root_level)
+        logger.error(f"❌ MCP server error: {e}")
+        raise
 
 if __name__ == "__main__":
     asyncio.run(main())
