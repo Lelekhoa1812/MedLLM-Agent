@@ -17,7 +17,7 @@ from pathlib import Path
 # MCP imports
 try:
     from mcp.server import Server
-    from mcp.types import Tool, TextContent, ImageContent, EmbeddedResource
+    from mcp.types import Tool, TextContent, ImageContent, EmbeddedResource, InitializationOptions, ServerCapabilities
 except ImportError:
     print("Error: MCP SDK not installed. Install with: pip install mcp", file=sys.stderr)
     sys.exit(1)
@@ -289,12 +289,33 @@ async def main():
             logging.getLogger("root").setLevel(original_root_level)
             logger.info("✅ MCP server stdio streams ready, starting server...")
             
+            # Create initialization options for the server
+            # The server capabilities are automatically determined from registered handlers
+            # Try to use Server's built-in method to get capabilities, or create minimal options
+            try:
+                # Try to get capabilities from the server if it has a method
+                if hasattr(app, 'get_capabilities'):
+                    capabilities = app.get_capabilities()
+                else:
+                    # Create minimal capabilities - tools are registered via @app.list_tools() decorator
+                    capabilities = ServerCapabilities(tools={})
+            except:
+                # Fallback: create minimal capabilities
+                capabilities = ServerCapabilities(tools={})
+            
+            initialization_options = InitializationOptions(
+                server_name="gemini-mcp-server",
+                server_version="1.0.0",
+                capabilities=capabilities
+            )
+            
             # Run the server - the Server class automatically handles initialization
             # The server will provide its capabilities based on registered handlers
             # (@app.list_tools() and @app.call_tool())
             await app.run(
                 read_stream=streams[0],
-                write_stream=streams[1]
+                write_stream=streams[1],
+                initialization_options=initialization_options
             )
     except Exception as e:
         logging.getLogger("root").setLevel(original_root_level)

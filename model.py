@@ -43,41 +43,84 @@ def initialize_medical_model(model_name: str):
     if model_name not in global_medical_models or global_medical_models[model_name] is None:
         logger.info(f"Initializing medical model: {model_name}...")
         model_path = MEDSWIN_MODELS[model_name]
-        tokenizer = AutoTokenizer.from_pretrained(model_path, token=HF_TOKEN)
+        # Load tokenizer with proper configuration for MedAlpaca-7B/LLaMA-based models
+        # MedAlpaca-7B is finetuned from LLaMA-7B, which uses specific tokenizer settings
+        tokenizer = AutoTokenizer.from_pretrained(
+            model_path, 
+            token=HF_TOKEN,
+            use_fast=False,  # Use slow tokenizer for better compatibility with LLaMA
+            padding_side="left"  # Left padding for causal LM
+        )
         
         # Fix tokenizer configuration for MedSwin/MedAlpaca-based models
         # MedAlpaca-7B is based on LLaMA, which uses specific special tokens
-        # These models need proper pad_token and eos_token configuration
+        # LLaMA models use:
+        # - bos_token: <s> (token ID 1)
+        # - eos_token: </s> (token ID 2)
+        # - unk_token: <unk> (token ID 0)
+        # - pad_token: typically not set, but we use eos_token
         
-        # MedAlpaca/LLaMA models typically use </s> as EOS token
-        # Ensure eos_token is set first (before pad_token)
+        # Ensure eos_token is properly set (LLaMA uses </s> with ID 2)
         if tokenizer.eos_token is None:
-            # Try to set EOS token - LLaMA-based models use </s>
+            # Try to decode eos_token_id if it exists
             if hasattr(tokenizer, 'eos_token_id') and tokenizer.eos_token_id is not None:
-                # If eos_token_id exists, get the token string
                 try:
-                    tokenizer.eos_token = tokenizer.decode([tokenizer.eos_token_id])
+                    eos_id = tokenizer.eos_token_id
+                    # Decode the token ID to get the string
+                    tokenizer.eos_token = tokenizer.decode([eos_id]) if eos_id < tokenizer.vocab_size else "</s>"
                 except:
+                    # Fallback: LLaMA uses </s> as EOS
                     tokenizer.eos_token = "</s>"
+                    try:
+                        tokenizer.eos_token_id = tokenizer.convert_tokens_to_ids("</s>")
+                    except:
+                        # If </s> doesn't exist, use ID 2 (standard LLaMA EOS token ID)
+                        tokenizer.eos_token_id = 2
             else:
+                # Set EOS token to </s> (standard for LLaMA)
                 tokenizer.eos_token = "</s>"
-                # Try to get the token ID
                 try:
                     tokenizer.eos_token_id = tokenizer.convert_tokens_to_ids("</s>")
                 except:
-                    # If </s> doesn't exist, use the last token ID (common in LLaMA)
-                    tokenizer.eos_token_id = tokenizer.vocab_size - 1
+                    # Standard LLaMA EOS token ID is 2
+                    tokenizer.eos_token_id = 2
         
-        # Set pad_token - MedAlpaca models typically use EOS as PAD
+        # Ensure bos_token is set (LLaMA uses <s> with ID 1)
+        if tokenizer.bos_token is None:
+            if hasattr(tokenizer, 'bos_token_id') and tokenizer.bos_token_id is not None:
+                try:
+                    bos_id = tokenizer.bos_token_id
+                    tokenizer.bos_token = tokenizer.decode([bos_id]) if bos_id < tokenizer.vocab_size else "<s>"
+                except:
+                    tokenizer.bos_token = "<s>"
+                    try:
+                        tokenizer.bos_token_id = tokenizer.convert_tokens_to_ids("<s>")
+                    except:
+                        tokenizer.bos_token_id = 1  # Standard LLaMA BOS token ID
+            else:
+                tokenizer.bos_token = "<s>"
+                try:
+                    tokenizer.bos_token_id = tokenizer.convert_tokens_to_ids("<s>")
+                except:
+                    tokenizer.bos_token_id = 1
+        
+        # Set pad_token - MedAlpaca/LLaMA models typically use EOS as PAD
+        # This is important for batch processing
         if tokenizer.pad_token is None:
-            # Use eos_token as pad_token (common in LLaMA-based models)
-            if tokenizer.eos_token is not None:
+            # Use eos_token as pad_token (standard practice for LLaMA-based models)
+            if tokenizer.eos_token is not None and tokenizer.eos_token_id is not None:
                 tokenizer.pad_token = tokenizer.eos_token
                 tokenizer.pad_token_id = tokenizer.eos_token_id
             else:
-                # Fallback: add a pad token
+                # Fallback: add a pad token (shouldn't happen if eos_token is set correctly)
+                logger.warning("EOS token not set, adding [PAD] token as fallback")
                 tokenizer.add_special_tokens({'pad_token': '[PAD]'})
                 tokenizer.pad_token_id = tokenizer.convert_tokens_to_ids('[PAD]')
+        
+        # Ensure tokenizer has proper attributes for LLaMA models
+        if not hasattr(tokenizer, 'model_max_length') or tokenizer.model_max_length is None:
+            # LLaMA models typically have 2048 or 4096 max length
+            tokenizer.model_max_length = 2048
         
         model = AutoModelForCausalLM.from_pretrained(
             model_path,
@@ -87,10 +130,30 @@ def initialize_medical_model(model_name: str):
             torch_dtype=torch.float16
         )
         
-        # Resize model embeddings if we added new tokens
-        if tokenizer.pad_token_id != model.config.pad_token_id:
-            model.resize_token_embeddings(len(tokenizer))
+        # Update model config to match tokenizer settings
+        # This ensures consistency between tokenizer and model
+        if hasattr(model.config, 'pad_token_id'):
+            if model.config.pad_token_id != tokenizer.pad_token_id:
+                model.config.pad_token_id = tokenizer.pad_token_id
+        else:
             model.config.pad_token_id = tokenizer.pad_token_id
+        
+        if hasattr(model.config, 'eos_token_id'):
+            if model.config.eos_token_id != tokenizer.eos_token_id:
+                model.config.eos_token_id = tokenizer.eos_token_id
+        else:
+            model.config.eos_token_id = tokenizer.eos_token_id
+        
+        if hasattr(model.config, 'bos_token_id'):
+            if model.config.bos_token_id != tokenizer.bos_token_id:
+                model.config.bos_token_id = tokenizer.bos_token_id
+        else:
+            model.config.bos_token_id = tokenizer.bos_token_id
+        
+        # Resize model embeddings if we added new tokens (shouldn't happen with proper config)
+        if len(tokenizer) > model.config.vocab_size:
+            logger.info(f"Resizing model embeddings from {model.config.vocab_size} to {len(tokenizer)}")
+            model.resize_token_embeddings(len(tokenizer))
         
         global_medical_models[model_name] = model
         global_medical_tokenizers[model_name] = tokenizer
