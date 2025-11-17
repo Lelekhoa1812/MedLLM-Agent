@@ -1170,37 +1170,48 @@ def autonomous_execution_strategy(reasoning: dict, plan: dict, use_rag: bool, us
     
     return strategy
 
-async def gemini_supervisor_directives_async(query: str, reasoning: dict, plan: dict, time_elapsed: float, max_duration: int = 120) -> dict:
-    """Request supervisor-style task breakdown from Gemini MCP"""
+async def gemini_supervisor_breakdown_async(query: str, use_rag: bool, use_web_search: bool, time_elapsed: float, max_duration: int = 120) -> dict:
+    """
+    Gemini Supervisor: Break user query into 2-4 sub-topics (JSON format)
+    This is the main supervisor function that orchestrates the MAC architecture.
+    All internal thoughts are logged, not displayed.
+    """
     remaining_time = max(15, max_duration - time_elapsed)
-    plan_json = json.dumps(plan)
-    reasoning_json = json.dumps(reasoning)
     
-    prompt = f"""You supervise a MedSwin medical specialist model that has a limited output window (~800 tokens).
-Break the following medical query into concise sequential tasks so MedSwin can answer step-by-step.
+    mode_description = []
+    if use_rag:
+        mode_description.append("RAG mode enabled - will use retrieved documents")
+    if use_web_search:
+        mode_description.append("Web search mode enabled - will search online sources")
+    if not mode_description:
+        mode_description.append("Direct answer mode - no additional context")
+    
+    prompt = f"""You are a supervisor agent coordinating with a MedSwin medical specialist model.
+Break the following medical query into 2-4 focused sub-topics that MedSwin can answer sequentially.
 
 Query: "{query}"
-Reasoning Analysis: {reasoning_json}
-Existing Plan: {plan_json}
-Time Remaining (soft limit): ~{remaining_time:.1f}s (hard limit {max_duration}s). Avoid more than 3 tasks. 
+Mode: {', '.join(mode_description)}
+Time Remaining: ~{remaining_time:.1f}s
 
-Return JSON with:
+Return ONLY valid JSON (no markdown, no tables, no explanations):
 {{
-  "overall_strategy": "short summary of approach (<=200 chars)",
-  "tasks": [
-    {{"id": 1, "instruction": "concrete directive for MedSwin", "expected_tokens": 200, "challenge": "optional short challenge to double-check"}},
+  "sub_topics": [
+    {{
+      "id": 1,
+      "topic": "concise topic name",
+      "instruction": "specific directive for MedSwin to answer this topic",
+      "expected_tokens": 200,
+      "priority": "high|medium|low"
+    }},
     ...
   ],
-  "fast_track": true/false,  # true if remaining_time < 25s
-  "escalation_prompt": "optional single-line reminder to wrap up quickly if time is low"
+  "max_topics": 4,
+  "strategy": "brief strategy description"
 }}
 
-Ensure tasks reference medical reasoning and are ordered so MedSwin can execute one-by-one."""
+Keep topics focused and actionable. Each topic should be answerable in ~200 tokens by MedSwin."""
     
-    system_prompt = (
-        "You are Gemini MCP supervising a constrained MedSwin model. "
-        "Produce structured JSON that keeps MedSwin focused and concise."
-    )
+    system_prompt = "You are a medical query supervisor. Break queries into structured JSON sub-topics. Return ONLY valid JSON."
     
     response = await call_agent(
         user_prompt=prompt,
@@ -1210,38 +1221,157 @@ Ensure tasks reference medical reasoning and are ordered so MedSwin can execute 
     )
     
     try:
-        start = response.find('{')
-        end = response.rfind('}') + 1
-        if start >= 0 and end > start:
-            directives = json.loads(response[start:end])
+        # Extract JSON from response
+        json_start = response.find('{')
+        json_end = response.rfind('}') + 1
+        if json_start >= 0 and json_end > json_start:
+            breakdown = json.loads(response[json_start:json_end])
+            logger.info(f"[GEMINI SUPERVISOR] Query broken into {len(breakdown.get('sub_topics', []))} sub-topics")
+            logger.debug(f"[GEMINI SUPERVISOR] Breakdown: {json.dumps(breakdown, indent=2)}")
+            return breakdown
         else:
             raise ValueError("Supervisor JSON not found")
     except Exception as exc:
-        logger.error(f"Supervisor directive parsing failed: {exc}")
-        directives = {
-            "overall_strategy": "Address tasks sequentially with concise clinical bullets.",
-            "tasks": [
-                {"id": 1, "instruction": "Summarize the patient's core question.", "expected_tokens": 120},
-                {"id": 2, "instruction": "List key clinical insights or differential items.", "expected_tokens": 200},
-                {"id": 3, "instruction": "Deliver final guidance and follow-up recommendations.", "expected_tokens": 180},
+        logger.error(f"[GEMINI SUPERVISOR] Breakdown parsing failed: {exc}")
+        # Fallback: simple breakdown
+        breakdown = {
+            "sub_topics": [
+                {"id": 1, "topic": "Core Question", "instruction": "Address the main medical question", "expected_tokens": 200, "priority": "high"},
+                {"id": 2, "topic": "Clinical Details", "instruction": "Provide key clinical insights", "expected_tokens": 200, "priority": "medium"},
             ],
-            "fast_track": remaining_time < 25,
-            "escalation_prompt": "Wrap up immediately if time is almost over."
+            "max_topics": 2,
+            "strategy": "Sequential answer with key points"
         }
-    return directives
+        logger.warning(f"[GEMINI SUPERVISOR] Using fallback breakdown")
+        return breakdown
 
-def gemini_supervisor_directives(query: str, reasoning: dict, plan: dict, time_elapsed: float, max_duration: int = 120) -> dict:
-    """Wrapper to obtain supervisor directives synchronously"""
-    if not MCP_AVAILABLE:
-        logger.warning("Gemini MCP unavailable for supervisor directives, using fallback.")
+async def gemini_supervisor_search_strategies_async(query: str, time_elapsed: float) -> dict:
+    """
+    Gemini Supervisor: In search mode, break query into 1-4 searching strategies
+    Returns JSON with search strategies that will be executed with ddgs
+    """
+    prompt = f"""You are supervising web search for a medical query.
+Break this query into 1-4 focused search strategies (each targeting 1-2 sources).
+
+Query: "{query}"
+
+Return ONLY valid JSON:
+{{
+  "search_strategies": [
+    {{
+      "id": 1,
+      "strategy": "search query string",
+      "target_sources": 1,
+      "focus": "what to search for"
+    }},
+    ...
+  ],
+  "max_strategies": 4
+}}
+
+Keep strategies focused and avoid overlap."""
+    
+    system_prompt = "You are a search strategy supervisor. Create focused search queries. Return ONLY valid JSON."
+    
+    response = await call_agent(
+        user_prompt=prompt,
+        system_prompt=system_prompt,
+        model=GEMINI_MODEL_LITE,  # Use lite model for search planning
+        temperature=0.2
+    )
+    
+    try:
+        json_start = response.find('{')
+        json_end = response.rfind('}') + 1
+        if json_start >= 0 and json_end > json_start:
+            strategies = json.loads(response[json_start:json_end])
+            logger.info(f"[GEMINI SUPERVISOR] Created {len(strategies.get('search_strategies', []))} search strategies")
+            logger.debug(f"[GEMINI SUPERVISOR] Strategies: {json.dumps(strategies, indent=2)}")
+            return strategies
+        else:
+            raise ValueError("Search strategies JSON not found")
+    except Exception as exc:
+        logger.error(f"[GEMINI SUPERVISOR] Search strategies parsing failed: {exc}")
         return {
-            "overall_strategy": "Follow the internal plan sequentially with concise sections.",
-            "tasks": [
-                {"id": step_idx + 1, "instruction": step.get("description", step.get("action", "")), "expected_tokens": 180}
-                for step_idx, step in enumerate(plan.get("steps", [])[:3])
+            "search_strategies": [
+                {"id": 1, "strategy": query, "target_sources": 2, "focus": "main query"}
             ],
-            "fast_track": False,
-            "escalation_prompt": ""
+            "max_strategies": 1
+        }
+
+async def gemini_supervisor_rag_brainstorm_async(query: str, retrieved_docs: str, time_elapsed: float) -> dict:
+    """
+    Gemini Supervisor: In RAG mode, brainstorm retrieved documents into 1-4 short contexts
+    These contexts will be passed to MedSwin to support decision-making
+    """
+    # Limit retrieved docs to avoid token overflow
+    max_doc_length = 3000
+    if len(retrieved_docs) > max_doc_length:
+        retrieved_docs = retrieved_docs[:max_doc_length] + "..."
+    
+    prompt = f"""You are supervising RAG context preparation for a medical query.
+Brainstorm the retrieved documents into 1-4 concise, focused contexts that MedSwin can use.
+
+Query: "{query}"
+Retrieved Documents:
+{retrieved_docs}
+
+Return ONLY valid JSON:
+{{
+  "contexts": [
+    {{
+      "id": 1,
+      "context": "concise summary of relevant information (keep under 500 chars)",
+      "focus": "what this context covers",
+      "relevance": "high|medium|low"
+    }},
+    ...
+  ],
+  "max_contexts": 4
+}}
+
+Keep contexts brief and factual. Avoid redundancy."""
+    
+    system_prompt = "You are a RAG context supervisor. Summarize documents into concise contexts. Return ONLY valid JSON."
+    
+    response = await call_agent(
+        user_prompt=prompt,
+        system_prompt=system_prompt,
+        model=GEMINI_MODEL_LITE,  # Use lite model for RAG brainstorming
+        temperature=0.2
+    )
+    
+    try:
+        json_start = response.find('{')
+        json_end = response.rfind('}') + 1
+        if json_start >= 0 and json_end > json_start:
+            contexts = json.loads(response[json_start:json_end])
+            logger.info(f"[GEMINI SUPERVISOR] Brainstormed {len(contexts.get('contexts', []))} RAG contexts")
+            logger.debug(f"[GEMINI SUPERVISOR] Contexts: {json.dumps(contexts, indent=2)}")
+            return contexts
+        else:
+            raise ValueError("RAG contexts JSON not found")
+    except Exception as exc:
+        logger.error(f"[GEMINI SUPERVISOR] RAG brainstorming parsing failed: {exc}")
+        # Fallback: use retrieved docs as single context
+        return {
+            "contexts": [
+                {"id": 1, "context": retrieved_docs[:500], "focus": "retrieved information", "relevance": "high"}
+            ],
+            "max_contexts": 1
+        }
+
+def gemini_supervisor_breakdown(query: str, use_rag: bool, use_web_search: bool, time_elapsed: float, max_duration: int = 120) -> dict:
+    """Wrapper to obtain supervisor breakdown synchronously"""
+    if not MCP_AVAILABLE:
+        logger.warning("[GEMINI SUPERVISOR] MCP unavailable, using fallback breakdown")
+        return {
+            "sub_topics": [
+                {"id": 1, "topic": "Core Question", "instruction": "Address the main medical question", "expected_tokens": 200, "priority": "high"},
+                {"id": 2, "topic": "Clinical Details", "instruction": "Provide key clinical insights", "expected_tokens": 200, "priority": "medium"},
+            ],
+            "max_topics": 2,
+            "strategy": "Sequential answer with key points"
         }
     
     try:
@@ -1250,54 +1380,166 @@ def gemini_supervisor_directives(query: str, reasoning: dict, plan: dict, time_e
             try:
                 import nest_asyncio
                 return nest_asyncio.run(
-                    gemini_supervisor_directives_async(query, reasoning, plan, time_elapsed, max_duration)
+                    gemini_supervisor_breakdown_async(query, use_rag, use_web_search, time_elapsed, max_duration)
                 )
             except Exception as exc:
-                logger.error(f"Nested supervisor directive execution failed: {exc}")
+                logger.error(f"[GEMINI SUPERVISOR] Nested breakdown execution failed: {exc}")
                 raise
         return loop.run_until_complete(
-            gemini_supervisor_directives_async(query, reasoning, plan, time_elapsed, max_duration)
+            gemini_supervisor_breakdown_async(query, use_rag, use_web_search, time_elapsed, max_duration)
         )
     except Exception as exc:
-        logger.error(f"Supervisor directive request failed: {exc}")
+        logger.error(f"[GEMINI SUPERVISOR] Breakdown request failed: {exc}")
         return {
-            "overall_strategy": "Provide a concise clinical answer with numbered mini-sections.",
-            "tasks": [
-                {"id": 1, "instruction": "Clarify the medical problem and relevant context.", "expected_tokens": 150},
-                {"id": 2, "instruction": "Give evidence-based assessment or reasoning.", "expected_tokens": 200},
-                {"id": 3, "instruction": "State actionable guidance and cautions.", "expected_tokens": 150},
+            "sub_topics": [
+                {"id": 1, "topic": "Core Question", "instruction": "Address the main medical question", "expected_tokens": 200, "priority": "high"},
             ],
-            "fast_track": True,
-            "escalation_prompt": "Deliver the final summary immediately if time is nearly done."
+            "max_topics": 1,
+            "strategy": "Direct answer"
         }
 
-def format_supervisor_directives_text(directives: dict) -> str:
-    """Convert supervisor directive dict into prompt-friendly text"""
-    if not directives:
-        return ""
+def gemini_supervisor_search_strategies(query: str, time_elapsed: float) -> dict:
+    """Wrapper to obtain search strategies synchronously"""
+    if not MCP_AVAILABLE:
+        logger.warning("[GEMINI SUPERVISOR] MCP unavailable for search strategies")
+        return {
+            "search_strategies": [
+                {"id": 1, "strategy": query, "target_sources": 2, "focus": "main query"}
+            ],
+            "max_strategies": 1
+        }
     
-    lines = []
-    overall = directives.get("overall_strategy")
-    if overall:
-        lines.append(f"Supervisor Strategy: {overall}")
+    try:
+        loop = asyncio.get_event_loop()
+        if loop.is_running():
+            try:
+                import nest_asyncio
+                return nest_asyncio.run(gemini_supervisor_search_strategies_async(query, time_elapsed))
+            except Exception as exc:
+                logger.error(f"[GEMINI SUPERVISOR] Nested search strategies execution failed: {exc}")
+                return {
+                    "search_strategies": [
+                        {"id": 1, "strategy": query, "target_sources": 2, "focus": "main query"}
+                    ],
+                    "max_strategies": 1
+                }
+        return loop.run_until_complete(gemini_supervisor_search_strategies_async(query, time_elapsed))
+    except Exception as exc:
+        logger.error(f"[GEMINI SUPERVISOR] Search strategies request failed: {exc}")
+        return {
+            "search_strategies": [
+                {"id": 1, "strategy": query, "target_sources": 2, "focus": "main query"}
+            ],
+            "max_strategies": 1
+        }
+
+def gemini_supervisor_rag_brainstorm(query: str, retrieved_docs: str, time_elapsed: float) -> dict:
+    """Wrapper to obtain RAG brainstorm synchronously"""
+    if not MCP_AVAILABLE:
+        logger.warning("[GEMINI SUPERVISOR] MCP unavailable for RAG brainstorm")
+        return {
+            "contexts": [
+                {"id": 1, "context": retrieved_docs[:500], "focus": "retrieved information", "relevance": "high"}
+            ],
+            "max_contexts": 1
+        }
     
-    tasks = directives.get("tasks") or []
-    for task in tasks:
-        task_id = task.get("id")
-        instruction = task.get("instruction", "").strip()
-        challenge = task.get("challenge", "").strip()
-        expected_tokens = task.get("expected_tokens", 180)
-        if instruction:
-            task_line = f"{task_id}. {instruction} (target ≤{expected_tokens} tokens)"
-            if challenge:
-                task_line += f" | Challenge: {challenge}"
-            lines.append(task_line)
+    try:
+        loop = asyncio.get_event_loop()
+        if loop.is_running():
+            try:
+                import nest_asyncio
+                return nest_asyncio.run(gemini_supervisor_rag_brainstorm_async(query, retrieved_docs, time_elapsed))
+            except Exception as exc:
+                logger.error(f"[GEMINI SUPERVISOR] Nested RAG brainstorm execution failed: {exc}")
+                return {
+                    "contexts": [
+                        {"id": 1, "context": retrieved_docs[:500], "focus": "retrieved information", "relevance": "high"}
+                    ],
+                    "max_contexts": 1
+                }
+        return loop.run_until_complete(gemini_supervisor_rag_brainstorm_async(query, retrieved_docs, time_elapsed))
+    except Exception as exc:
+        logger.error(f"[GEMINI SUPERVISOR] RAG brainstorm request failed: {exc}")
+        return {
+            "contexts": [
+                {"id": 1, "context": retrieved_docs[:500], "focus": "retrieved information", "relevance": "high"}
+            ],
+            "max_contexts": 1
+        }
+
+@spaces.GPU(max_duration=120)
+def execute_medswin_task(
+    medical_model_obj,
+    medical_tokenizer,
+    task_instruction: str,
+    context: str,
+    system_prompt_base: str,
+    temperature: float,
+    max_new_tokens: int,
+    top_p: float,
+    top_k: int,
+    penalty: float
+) -> str:
+    """
+    MedSwin Specialist: Execute a single task assigned by Gemini Supervisor
+    This function is tagged with @spaces.GPU to run on GPU (ZeroGPU equivalent)
+    All internal thoughts are logged, only final answer is returned
+    """
+    # Build task-specific prompt
+    if context:
+        full_prompt = f"{system_prompt_base}\n\nContext:\n{context}\n\nTask: {task_instruction}\n\nAnswer concisely with key bullet points (Markdown format, no tables):"
+    else:
+        full_prompt = f"{system_prompt_base}\n\nTask: {task_instruction}\n\nAnswer concisely with key bullet points (Markdown format, no tables):"
     
-    escalation = directives.get("escalation_prompt")
-    if escalation:
-        lines.append(f"Escalation: {escalation}")
+    messages = [{"role": "system", "content": full_prompt}]
     
-    return "\n".join(lines)
+    # Format prompt
+    if hasattr(medical_tokenizer, 'chat_template') and medical_tokenizer.chat_template is not None:
+        try:
+            prompt = medical_tokenizer.apply_chat_template(
+                messages,
+                tokenize=False,
+                add_generation_prompt=True
+            )
+        except Exception as e:
+            logger.warning(f"[MEDSWIN] Chat template failed, using manual formatting: {e}")
+            prompt = format_prompt_manually(messages, medical_tokenizer)
+    else:
+        prompt = format_prompt_manually(messages, medical_tokenizer)
+    
+    # Tokenize and generate
+    inputs = medical_tokenizer(prompt, return_tensors="pt").to(medical_model_obj.device)
+    
+    eos_token_id = medical_tokenizer.eos_token_id or medical_tokenizer.pad_token_id
+    
+    with torch.no_grad():
+        outputs = medical_model_obj.generate(
+            **inputs,
+            max_new_tokens=min(max_new_tokens, 800),  # Limit per task
+            temperature=temperature,
+            top_p=top_p,
+            top_k=top_k,
+            repetition_penalty=penalty,
+            do_sample=True,
+            eos_token_id=eos_token_id,
+            pad_token_id=medical_tokenizer.pad_token_id or eos_token_id
+        )
+    
+    # Decode response
+    response = medical_tokenizer.decode(outputs[0][inputs['input_ids'].shape[1]:], skip_special_tokens=True)
+    
+    # Clean response - remove any table-like formatting, ensure Markdown bullets
+    response = response.strip()
+    # Remove table markers if present
+    if "|" in response and "---" in response:
+        logger.warning("[MEDSWIN] Detected table format, converting to Markdown bullets")
+        # Simple conversion: split by lines and convert to bullets
+        lines = [line.strip() for line in response.split('\n') if line.strip() and not line.strip().startswith('|') and '---' not in line]
+        response = '\n'.join([f"- {line}" if not line.startswith('-') else line for line in lines])
+    
+    logger.info(f"[MEDSWIN] Task completed: {len(response)} chars generated")
+    return response
 
 async def self_reflection_gemini(answer: str, query: str) -> dict:
     """Self-reflection using Gemini MCP"""
@@ -1615,104 +1857,72 @@ def stream_chat(
     index_dir = f"./{user_id}_index"
     has_rag_index = os.path.exists(index_dir)
     
-    supervisor_directives = None
-    supervisor_directives_text = ""
-    time_pressure_flag = False
-    time_pressure_message = ""
+    # ===== MAC ARCHITECTURE: GEMINI SUPERVISOR + MEDSWIN SPECIALIST =====
+    # All internal thoughts are logged, only final answer is displayed
     
-    # If agentic reasoning is disabled, skip all reasoning/planning and use MedSwin model alone
-    if disable_agentic_reasoning:
-        logger.info("🚫 Agentic reasoning disabled - using MedSwin model alone")
-        reasoning = None
-        plan = None
-        execution_strategy = None
-        final_use_rag = False  # Disable RAG when agentic reasoning is disabled
-        final_use_web_search = False  # Disable web search when agentic reasoning is disabled
-        reasoning_note = ""
-        original_lang = detect_language(message)
-        original_message = message
-        needs_translation = False  # Skip translation when agentic reasoning is disabled
-    else:
-        # ===== AUTONOMOUS REASONING =====
-        logger.info("🤔 Starting autonomous reasoning...")
-        reasoning = autonomous_reasoning(message, history)
-        
-        # ===== PLANNING =====
-        logger.info("📋 Creating execution plan...")
-        plan = create_execution_plan(reasoning, message, has_rag_index)
-        
-        # ===== AUTONOMOUS EXECUTION STRATEGY =====
-        logger.info("🎯 Determining execution strategy...")
-        execution_strategy = autonomous_execution_strategy(reasoning, plan, use_rag, use_web_search, has_rag_index)
-        
-        # Use autonomous strategy decisions (respect user's RAG setting and user toggles)
-        final_use_rag = execution_strategy["use_rag"] and has_rag_index  # Only use RAG if enabled AND documents exist
-        final_use_web_search = execution_strategy["use_web_search"]
-        
-        reasoning_note = execution_strategy.get("rationale", "")
-        if reasoning_note:
-            logger.info(f"Autonomous reasoning note: {reasoning_note}")
-        
-        supervisor_directives = gemini_supervisor_directives(
-            message,
-            reasoning,
-            plan,
-            elapsed(),
-            max_duration=120
-        )
-        supervisor_directives_text = format_supervisor_directives_text(supervisor_directives)
-        if supervisor_directives_text:
-            logger.info(f"Gemini Supervisor Tasks:\n{supervisor_directives_text}")
-        
-        if supervisor_directives.get("fast_track"):
-            logger.info("⚡ Supervisor requested fast-track execution to respect time budget.")
-            final_use_web_search = False  # Skip optional web search when supervisor requests fast track
-            logger.info("⚡ Supervisor: Fast-track requested due to limited time. Prioritizing concise synthesis.")
-        
-        
-        # Detect language and translate if needed (Step 1 of plan)
         original_lang = detect_language(message)
         original_message = message
         needs_translation = original_lang != "en"
         
         if needs_translation:
-            logger.info(f"Detected non-English language: {original_lang}, translating to English...")
+        logger.info(f"[GEMINI SUPERVISOR] Detected non-English language: {original_lang}, translating...")
             message = translate_text(message, target_lang="en", source_lang=original_lang)
-            logger.info(f"Translated query: {message}")
+        logger.info(f"[GEMINI SUPERVISOR] Translated query: {message[:100]}...")
     
-    # Initialize medical model
-    medical_model_obj, medical_tokenizer = initialize_medical_model(medical_model)
+    # Determine final modes (respect user settings and availability)
+    final_use_rag = use_rag and has_rag_index and not disable_agentic_reasoning
+    final_use_web_search = use_web_search and not disable_agentic_reasoning
     
-    # Adjust system prompt based on RAG setting and reasoning
+    # ===== STEP 1: GEMINI SUPERVISOR - Break query into sub-topics =====
     if disable_agentic_reasoning:
-        # Simple system prompt when agentic reasoning is disabled
-        base_system_prompt = system_prompt if system_prompt else "As a medical specialist, provide clinical and concise answers."
-    elif final_use_rag:
-        base_system_prompt = system_prompt if system_prompt else "As a medical specialist, provide clinical and concise answers based on the provided medical documents and context."
+        logger.info("[MAC] Agentic reasoning disabled - using MedSwin alone")
+        # Simple breakdown for direct mode
+        breakdown = {
+            "sub_topics": [
+                {"id": 1, "topic": "Answer", "instruction": message, "expected_tokens": 400, "priority": "high"}
+            ],
+            "max_topics": 1,
+            "strategy": "Direct answer"
+        }
     else:
-        base_system_prompt = "As a medical specialist, provide short and concise clinical answers. Be brief and avoid lengthy explanations. Focus on key medical facts only."
+        logger.info("[GEMINI SUPERVISOR] Breaking query into sub-topics...")
+        breakdown = gemini_supervisor_breakdown(message, final_use_rag, final_use_web_search, elapsed(), max_duration=120)
+        logger.info(f"[GEMINI SUPERVISOR] Created {len(breakdown.get('sub_topics', []))} sub-topics")
     
-    # Add reasoning context to system prompt for complex queries (only if reasoning is enabled)
-    if not disable_agentic_reasoning and reasoning and reasoning.get("complexity") in ["complex", "multi_faceted"]:
-        base_system_prompt += f"\n\nQuery Analysis: This is a {reasoning['complexity']} {reasoning['query_type']} query. Address all sub-questions: {', '.join(reasoning.get('sub_questions', [])[:3])}"
+    # ===== STEP 2: GEMINI SUPERVISOR - Handle Search Mode =====
+    search_contexts = []
+    web_urls = []
+    if final_use_web_search:
+        logger.info("[GEMINI SUPERVISOR] Search mode: Creating search strategies...")
+        search_strategies = gemini_supervisor_search_strategies(message, elapsed())
+        
+        # Execute searches for each strategy
+        all_search_results = []
+        for strategy in search_strategies.get("search_strategies", [])[:4]:  # Max 4 strategies
+            search_query = strategy.get("strategy", message)
+            target_sources = strategy.get("target_sources", 2)
+            logger.info(f"[GEMINI SUPERVISOR] Executing search: {search_query} (target: {target_sources} sources)")
+            
+            results = search_web(search_query, max_results=target_sources)
+            all_search_results.extend(results)
+            web_urls.extend([r.get('url', '') for r in results if r.get('url')])
+        
+        # Summarize search results with Gemini
+        if all_search_results:
+            logger.info(f"[GEMINI SUPERVISOR] Summarizing {len(all_search_results)} search results...")
+            search_summary = summarize_web_content(all_search_results, message)
+            if search_summary:
+                search_contexts.append(search_summary)
+                logger.info(f"[GEMINI SUPERVISOR] Search summary created: {len(search_summary)} chars")
     
-    if supervisor_directives_text:
-        base_system_prompt += (
-            f"\n\nGemini Supervisor Directives:\n{supervisor_directives_text}\n"
-            "Execute the tasks one-by-one, keeping each section within the suggested token budget. "
-            "If time becomes tight, summarize remaining insights immediately."
-        )
-    
-    # ===== EXECUTION: RAG Retrieval (Step 2) =====
-    rag_context = ""
-    source_info = ""
+    # ===== STEP 3: GEMINI SUPERVISOR - Handle RAG Mode =====
+    rag_contexts = []
     if final_use_rag and has_rag_index:
         if elapsed() >= soft_timeout - 10:
-            logger.warning("⏱️ Skipping RAG retrieval due to time pressure.")
-            time_pressure_flag = True
-            time_pressure_message = "Skipped some retrieval steps to finish within the time limit."
+            logger.warning("[GEMINI SUPERVISOR] Skipping RAG due to time pressure")
             final_use_rag = False
         else:
+            logger.info("[GEMINI SUPERVISOR] RAG mode: Retrieving documents...")
             embed_model = HuggingFaceEmbedding(model_name=EMBEDDING_MODEL, token=HF_TOKEN)
             Settings.embed_model = embed_model
             storage_context = StorageContext.from_defaults(persist_dir=index_dir)
@@ -1722,178 +1932,37 @@ def stream_chat(
                 base_retriever,
                 storage_context=storage_context,
                 simple_ratio_thresh=merge_threshold, 
-                verbose=True
+                verbose=False  # Reduce logging noise
             )
-            logger.info(f"Query: {message}")
-            retrieval_start = time.time()
             merged_nodes = auto_merging_retriever.retrieve(message)
-            logger.info(f"Retrieved {len(merged_nodes)} merged nodes in {time.time() - retrieval_start:.2f}s")
-            merged_file_sources = {}
-            for node in merged_nodes:
-                if hasattr(node.node, 'metadata') and 'file_name' in node.node.metadata:
-                    file_name = node.node.metadata['file_name']
-                    if file_name not in merged_file_sources:
-                        merged_file_sources[file_name] = 0
-                    merged_file_sources[file_name] += 1
-            logger.info(f"Merged retrieval file distribution: {merged_file_sources}")
-            rag_context = "\n\n".join([n.node.text for n in merged_nodes])
-            if merged_file_sources:
-                source_info = "\n\nRetrieved information from files: " + ", ".join(merged_file_sources.keys())
-    
-    # ===== EXECUTION: Web Search (Step 3) =====
-    web_context = ""
-    web_sources = []
-    web_urls = []  # Store URLs for citations
-    if final_use_web_search:
-        if elapsed() >= soft_timeout - 5:
-            logger.warning("⏱️ Skipping web search to stay within execution window.")
-            time_pressure_flag = True
-            time_pressure_message = "Web search skipped due to time constraints."
-            final_use_web_search = False
-        else:
-            logger.info("🌐 Performing web search (will use Gemini MCP for summarization)...")
-            web_results = search_web(message, max_results=5)
-            if web_results:
-                logger.info(f"📊 Found {len(web_results)} web search results, now summarizing with Gemini MCP...")
-                web_summary = summarize_web_content(web_results, message)
-                if web_summary and len(web_summary) > 50:  # Check if we got a real summary
-                    web_context = f"\n\nAdditional Web Sources (summarized with Gemini MCP):\n{web_summary}"
-                else:
-                    # Fallback: use first result's content
-                    web_context = f"\n\nAdditional Web Sources:\n{web_results[0].get('content', '')[:500]}"
-                web_sources = [r['title'] for r in web_results[:3]]
-                # Extract unique URLs for citations
-                web_urls = [r.get('url', '') for r in web_results if r.get('url')]
-                logger.info(f"✅ Web search completed: {len(web_results)} results, summarized with Gemini MCP")
-            else:
-                logger.warning("⚠️ Web search returned no results")
-    
-    # Build final context
-    context_parts = []
-    if rag_context:
-        context_parts.append(f"Document Context:\n{rag_context}")
-    if web_context:
-        context_parts.append(web_context)
-    
-    full_context = "\n\n".join(context_parts) if context_parts else ""
-    
-    # Build system prompt
-    if final_use_rag or final_use_web_search:
-        formatted_system_prompt = f"{base_system_prompt}\n\n{full_context}{source_info}"
-    else:
-        formatted_system_prompt = base_system_prompt
-    
-    # Prepare messages
-    messages = [{"role": "system", "content": formatted_system_prompt}]
-    for entry in history:
-        messages.append(entry)
-    messages.append({"role": "user", "content": message})
-    
-    # Get EOS token and adjust stopping criteria
-    eos_token_id = medical_tokenizer.eos_token_id
-    if eos_token_id is None:
-        eos_token_id = medical_tokenizer.pad_token_id
-    
-    # Increase max tokens for medical models (prevent early stopping)
-    max_new_tokens = int(max_new_tokens) if isinstance(max_new_tokens, (int, float)) else 2048
-    max_new_tokens = max(max_new_tokens, 1024)  # Minimum 1024 tokens for medical answers
-    
-    # Check if tokenizer has chat template, otherwise format manually
-    if hasattr(medical_tokenizer, 'chat_template') and medical_tokenizer.chat_template is not None:
-        try:
-            prompt = medical_tokenizer.apply_chat_template(
-                messages,
-                tokenize=False,
-                add_generation_prompt=True
-            )
-        except Exception as e:
-            logger.warning(f"Chat template failed, using manual formatting: {e}")
-            # Fallback to manual formatting
-            prompt = format_prompt_manually(messages, medical_tokenizer)
-    else:
-        # Manual formatting for models without chat template
-        prompt = format_prompt_manually(messages, medical_tokenizer)
-    
-    inputs = medical_tokenizer(prompt, return_tensors="pt").to(medical_model_obj.device)
-    prompt_length = inputs['input_ids'].shape[1]
-    
-    stop_event = threading.Event()
-    
-    class StopOnEvent(StoppingCriteria):
-        def __init__(self, stop_event):
-            super().__init__()
-            self.stop_event = stop_event
-
-        def __call__(self, input_ids, scores, **kwargs):
-            return self.stop_event.is_set()
-    
-    # Custom stopping criteria that doesn't stop on EOS too early
-    class MedicalStoppingCriteria(StoppingCriteria):
-        def __init__(self, eos_token_id, prompt_length, min_new_tokens=100):
-            super().__init__()
-            self.eos_token_id = eos_token_id
-            self.prompt_length = prompt_length
-            self.min_new_tokens = min_new_tokens
-
-        def __call__(self, input_ids, scores, **kwargs):
-            current_length = input_ids.shape[1]
-            new_tokens = current_length - self.prompt_length
-            last_token = input_ids[0, -1].item()
+            retrieved_docs = "\n\n".join([n.node.text for n in merged_nodes])
+            logger.info(f"[GEMINI SUPERVISOR] Retrieved {len(merged_nodes)} document nodes")
             
-            # Don't stop on EOS if we haven't generated enough new tokens
-            if new_tokens < self.min_new_tokens:
-                return False
-            # Allow EOS after minimum new tokens have been generated
-            return last_token == self.eos_token_id
+            # Brainstorm retrieved docs into contexts
+            logger.info("[GEMINI SUPERVISOR] Brainstorming RAG contexts...")
+            rag_brainstorm = gemini_supervisor_rag_brainstorm(message, retrieved_docs, elapsed())
+            rag_contexts = [ctx.get("context", "") for ctx in rag_brainstorm.get("contexts", [])]
+            logger.info(f"[GEMINI SUPERVISOR] Created {len(rag_contexts)} RAG contexts")
     
-    stopping_criteria = StoppingCriteriaList([
-        StopOnEvent(stop_event),
-        MedicalStoppingCriteria(eos_token_id, prompt_length, min_new_tokens=100)
-    ])
+    # ===== STEP 4: MEDSWIN SPECIALIST - Execute tasks sequentially =====
+    # Initialize medical model
+    medical_model_obj, medical_tokenizer = initialize_medical_model(medical_model)
     
-    def monitor_timeout():
-        nonlocal time_pressure_flag, time_pressure_message
-        while not stop_event.is_set():
-            current_elapsed = elapsed()
-            if current_elapsed >= hard_timeout:
-                logger.warning("⏳ Hard timeout reached – stopping generation thread.")
-                if not time_pressure_flag:
-                    time_pressure_flag = True
-                    if not time_pressure_message:
-                        time_pressure_message = "Stopped early to respect the 120s execution window."
-                stop_event.set()
-                break
-            time.sleep(0.5)
+    # Base system prompt for MedSwin (clean, no internal thoughts)
+    base_system_prompt = system_prompt if system_prompt else "As a medical specialist, provide clinical and concise answers. Use Markdown format with bullet points. Do not use tables."
     
-    streamer = TextIteratorStreamer(
-        medical_tokenizer,
-        skip_prompt=True,
-        skip_special_tokens=True
-    )
+    # Prepare context for MedSwin (combine RAG and search contexts)
+    combined_context = ""
+    if rag_contexts:
+        combined_context += "Document Context:\n" + "\n\n".join(rag_contexts[:4])  # Max 4 contexts
+    if search_contexts:
+        if combined_context:
+            combined_context += "\n\n"
+        combined_context += "Web Search Context:\n" + "\n\n".join(search_contexts)
     
-    temperature = float(temperature) if isinstance(temperature, (int, float)) else 0.7
-    top_p = float(top_p) if isinstance(top_p, (int, float)) else 0.95
-    top_k = int(top_k) if isinstance(top_k, (int, float)) else 50
-    penalty = float(penalty) if isinstance(penalty, (int, float)) else 1.2
-    
-    generation_kwargs = dict(
-        inputs,
-        streamer=streamer,
-        max_new_tokens=max_new_tokens,
-        temperature=temperature,
-        top_p=top_p,
-        top_k=top_k,
-        repetition_penalty=penalty,
-        do_sample=True,
-        stopping_criteria=stopping_criteria,
-        eos_token_id=eos_token_id,
-        pad_token_id=medical_tokenizer.pad_token_id or eos_token_id
-    )
-    
-    thread = threading.Thread(target=medical_model_obj.generate, kwargs=generation_kwargs)
-    thread.start()
-    timeout_thread = threading.Thread(target=monitor_timeout, daemon=True)
-    timeout_thread.start()
+    # Execute MedSwin tasks for each sub-topic
+    logger.info(f"[MEDSWIN] Executing {len(breakdown.get('sub_topics', []))} tasks sequentially...")
+    medswin_answers = []
     
     updated_history = history + [
         {"role": "user", "content": original_message},
@@ -1901,73 +1970,100 @@ def stream_chat(
     ]
     yield updated_history
     
-    partial_response = ""
-    try:
-        for new_text in streamer:
-            partial_response += new_text
-            updated_history[-1]["content"] = partial_response
-            yield updated_history
-            
-            if not time_pressure_flag and elapsed() >= soft_timeout:
-                logger.warning("⏱️ Soft timeout reached – finalizing response.")
-                time_pressure_flag = True
-                if not time_pressure_message:
-                    time_pressure_message = "Soft timeout reached. Delivering final answer early."
-                stop_event.set()
+    for idx, sub_topic in enumerate(breakdown.get("sub_topics", []), 1):
+        if elapsed() >= hard_timeout - 5:
+            logger.warning(f"[MEDSWIN] Time limit approaching, stopping at task {idx}")
                 break
         
-        # ===== SELF-REFLECTION (Step 6) =====
-        if not disable_agentic_reasoning and reasoning and reasoning.get("complexity") in ["complex", "multi_faceted"]:
-            logger.info("🔍 Performing self-reflection on answer quality...")
-            reflection = self_reflection(partial_response, message, reasoning)
+        task_instruction = sub_topic.get("instruction", "")
+        topic_name = sub_topic.get("topic", f"Topic {idx}")
+        priority = sub_topic.get("priority", "medium")
+        
+        logger.info(f"[MEDSWIN] Executing task {idx}/{len(breakdown.get('sub_topics', []))}: {topic_name} (priority: {priority})")
+        
+        # Select relevant context for this task (if multiple contexts available)
+        task_context = combined_context
+        if len(rag_contexts) > 1 and idx <= len(rag_contexts):
+            # Use corresponding RAG context if available
+            task_context = rag_contexts[idx - 1] if idx <= len(rag_contexts) else combined_context
+        
+        # Execute MedSwin task (with GPU tag)
+        try:
+            task_answer = execute_medswin_task(
+                medical_model_obj=medical_model_obj,
+                medical_tokenizer=medical_tokenizer,
+                task_instruction=task_instruction,
+                context=task_context if task_context else "",
+                system_prompt_base=base_system_prompt,
+        temperature=temperature,
+                max_new_tokens=min(max_new_tokens, 800),  # Limit per task
+        top_p=top_p,
+        top_k=top_k,
+                penalty=penalty
+            )
             
-            # Add reflection note if score is low or improvements suggested
-            if reflection.get("overall_score", 10) < 7 or reflection.get("improvement_suggestions"):
-                reflection_note = f"\n\n---\n**Self-Reflection** (Score: {reflection.get('overall_score', 'N/A')}/10)"
-                if reflection.get("improvement_suggestions"):
-                    reflection_note += f"\n💡 Suggestions: {', '.join(reflection['improvement_suggestions'][:2])}"
-                partial_response += reflection_note
-                updated_history[-1]["content"] = partial_response
-        
-        # Add reasoning note if autonomous override occurred
-        # Internal planning notes stay in logs only; nothing is prepended to the user response
-        
+            # Format task answer with topic header
+            formatted_answer = f"## {topic_name}\n\n{task_answer}"
+            medswin_answers.append(formatted_answer)
+            logger.info(f"[MEDSWIN] Task {idx} completed: {len(task_answer)} chars")
+            
+            # Stream partial answer as we complete each task
+            partial_final = "\n\n".join(medswin_answers)
+            updated_history[-1]["content"] = partial_final
+    yield updated_history
+    
+        except Exception as e:
+            logger.error(f"[MEDSWIN] Task {idx} failed: {e}")
+            # Continue with next task
+            continue
+    
+    # ===== STEP 5: Combine all MedSwin answers into final answer =====
+    final_answer = "\n\n".join(medswin_answers) if medswin_answers else "I apologize, but I was unable to generate a response."
+    
+    # Clean final answer - ensure no tables, only Markdown bullets
+    if "|" in final_answer and "---" in final_answer:
+        logger.warning("[MEDSWIN] Final answer contains tables, converting to bullets")
+        lines = final_answer.split('\n')
+        cleaned_lines = []
+        for line in lines:
+            if '|' in line and '---' not in line:
+                # Convert table row to bullet points
+                cells = [cell.strip() for cell in line.split('|') if cell.strip()]
+                if cells:
+                    cleaned_lines.append(f"- {' / '.join(cells)}")
+            elif '---' not in line:
+                cleaned_lines.append(line)
+        final_answer = '\n'.join(cleaned_lines)
+    
+    # ===== STEP 6: Finalize answer (translate, add citations, format) =====
         # Translate back if needed
-        if needs_translation and partial_response:
-            logger.info(f"Translating response back to {original_lang}...")
-            translated_response = translate_text(partial_response, target_lang=original_lang, source_lang="en")
-            partial_response = translated_response
+    if needs_translation and final_answer:
+        logger.info(f"[GEMINI SUPERVISOR] Translating response back to {original_lang}...")
+        final_answer = translate_text(final_answer, target_lang=original_lang, source_lang="en")
         
         # Add citations if web sources were used
         citations_text = ""
         if web_urls:
-            # Get unique domains
             unique_urls = list(dict.fromkeys(web_urls))  # Preserve order, remove duplicates
             citation_links = []
             for url in unique_urls[:5]:  # Limit to 5 citations
                 domain = format_url_as_domain(url)
                 if domain:
-                    # Create markdown link: [domain](url)
                     citation_links.append(f"[{domain}]({url})")
             
             if citation_links:
                 citations_text = "\n\n**Sources:** " + ", ".join(citation_links)
         
-        if time_pressure_flag and time_pressure_message:
-            partial_response += f"\n\n⏱️ {time_pressure_message}"
-        
-        # Add speaker icon and citations to assistant message
+    # Add speaker icon
         speaker_icon = ' 🔊'
-        partial_response_with_speaker = partial_response + citations_text + speaker_icon
-        updated_history[-1]["content"] = partial_response_with_speaker
+    final_answer_with_metadata = final_answer + citations_text + speaker_icon
         
-        stop_event.set()  # Ensure timeout monitor thread exits once response is finalized
+    # Update history with final answer (ONLY final answer, no internal thoughts)
+    updated_history[-1]["content"] = final_answer_with_metadata
         yield updated_history
             
-    except GeneratorExit:
-        stop_event.set()
-        thread.join()
-        raise
+    # Log completion
+    logger.info(f"[MAC] Final answer generated: {len(final_answer)} chars, {len(breakdown.get('sub_topics', []))} tasks completed")
 
 def generate_speech_for_message(text: str):
     """Generate speech for a message and return audio file"""

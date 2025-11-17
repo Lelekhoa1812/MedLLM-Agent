@@ -55,7 +55,14 @@ tags:
 
 ### 🎤 **Voice Features**
 - **Speech-to-Text**: Voice input transcription using Gemini MCP
-- **Text-to-Speech**: Voice output generation using Maya1 TTS model (optional, fallback to MCP if unavailable)
+- **Inline Mic Experience**: Built-in microphone widget with live recording timer that drops transcripts straight into the chat box
+- **Text-to-Speech**: Voice output generation using Maya1 TTS model (optional, fallback to MCP if unavailable) plus a one-click "Play Response" control for the latest answer
+
+### 🛡️ **Autonomous Guardrails**
+- **Gemini Supervisor Tasks**: Time-aware directives keep MedSwin within token budgets and can fast-track by skipping optional web search
+- **Self-Reflection Loop**: Gemini MCP scores complex answers and appends improvement hints when quality drops
+- **Automatic Citations**: Web-grounded replies include deduplicated source links from the latest search batch
+- **Deterministic Mode**: `Disable agentic reasoning` switch runs MedSwin alone for offline-friendly, model-only answers
 
 ### ⚙️ **Advanced Configuration**
 - Customizable generation parameters (temperature, top-p, top-k)
