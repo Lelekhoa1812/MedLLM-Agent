@@ -200,10 +200,12 @@ global_mcp_session = None
 global_mcp_stdio_ctx = None  # Store stdio context to keep it alive
 global_mcp_lock = threading.Lock()  # Lock for thread-safe session access
 # MCP server configuration via environment variables
-# Gemini MCP server: aistudio-mcp-server
-# Example: MCP_SERVER_COMMAND="npx" MCP_SERVER_ARGS="-y @aistudio-mcp/server"
-MCP_SERVER_COMMAND = os.environ.get("MCP_SERVER_COMMAND", "npx")
-MCP_SERVER_ARGS = os.environ.get("MCP_SERVER_ARGS", "-y @aistudio-mcp/server").split() if os.environ.get("MCP_SERVER_ARGS") else ["-y", "@aistudio-mcp/server"]
+# Gemini MCP server: aistudio-mcp-server (Python package)
+# Install with: pip install aistudio-mcp-server
+# Example: MCP_SERVER_COMMAND="python" MCP_SERVER_ARGS="-m aistudio_mcp_server"
+# Or: MCP_SERVER_COMMAND="aistudio-mcp-server" MCP_SERVER_ARGS=""
+MCP_SERVER_COMMAND = os.environ.get("MCP_SERVER_COMMAND", "python")
+MCP_SERVER_ARGS = os.environ.get("MCP_SERVER_ARGS", "-m aistudio_mcp_server").split() if os.environ.get("MCP_SERVER_ARGS") else ["-m", "aistudio_mcp_server"]
 
 async def get_mcp_session():
     """Get or create MCP client session with proper context management"""

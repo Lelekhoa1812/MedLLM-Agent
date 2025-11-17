@@ -111,8 +111,8 @@ The application uses Gemini MCP (Model Context Protocol) for translation, docume
 export GEMINI_API_KEY="your-gemini-api-key"
 
 # Gemini MCP Server Configuration
-export MCP_SERVER_COMMAND="npx"
-export MCP_SERVER_ARGS="-y @aistudio-mcp/server"
+export MCP_SERVER_COMMAND="python"
+export MCP_SERVER_ARGS="-m aistudio_mcp_server"
 
 # Optional Gemini Configuration
 export GEMINI_MODEL="gemini-2.5-flash"  # For harder tasks (default)
@@ -145,8 +145,8 @@ export GEMINI_TEMPERATURE=0.2  # Temperature for generation 0-2 (default: 0.2)
 
 2. **Install Gemini MCP Server**:
    ```bash
-   # Using npx (Node.js) - recommended
-   npx -y @aistudio-mcp/server
+   # Install Python package
+   pip install aistudio-mcp-server
    ```
 
 3. **Get Gemini API Key**:
@@ -156,8 +156,8 @@ export GEMINI_TEMPERATURE=0.2  # Temperature for generation 0-2 (default: 0.2)
 4. **Configure via Environment Variables**:
    ```bash
    export GEMINI_API_KEY="your-gemini-api-key"
-   export MCP_SERVER_COMMAND="npx"
-   export MCP_SERVER_ARGS="-y @aistudio-mcp/server"
+   export MCP_SERVER_COMMAND="python"
+   export MCP_SERVER_ARGS="-m aistudio_mcp_server"
    ```
 
 **Note**: The application requires Gemini MCP for translation, document parsing, transcription, and summarization. Web search functionality still supports fallback to direct library calls if MCP is not configured.
