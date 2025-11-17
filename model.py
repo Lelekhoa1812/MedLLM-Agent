@@ -39,7 +39,6 @@ global_medical_tokenizers = {}
 
 def initialize_medical_model(model_name: str):
     """Initialize medical model (MedSwin) - following standard LLaMA/MedAlpaca initialization
-    
     Key points:
     - Load tokenizer with proper settings for LLaMA-based models
     - Load model with device_map="auto" for ZeroGPU Spaces
@@ -63,10 +62,10 @@ def initialize_medical_model(model_name: str):
             tokenizer.pad_token = tokenizer.eos_token
             tokenizer.pad_token_id = tokenizer.eos_token_id
         
-        # CRITICAL: Set padding_side to "left" for LLaMA-based models
-        # This ensures proper attention alignment and prevents corrupted output
-        # LLaMA models are autoregressive and generate left-to-right, so padding must be on the left
-        tokenizer.padding_side = "left"
+        # CRITICAL: Set padding_side to "right" for generation
+        # Left padding is only for batch training. For generation, we need right padding
+        # so the model generates correctly from left to right
+        tokenizer.padding_side = "right"
         logger.info(f"Tokenizer padding_side set to: {tokenizer.padding_side}")
         
         # Load model - use device_map="auto" for ZeroGPU Spaces
@@ -158,12 +157,14 @@ def generate_with_medswin(
     # For device_map="auto", get device from first parameter
     device = next(medical_model_obj.parameters()).device
     
-    # Tokenize prompt - LLaMA tokenizers automatically add BOS token when add_special_tokens=True
-    # This is the standard way to tokenize for LLaMA-based models
+    # Tokenize prompt - For LLaMA-based models, we should NOT add special tokens manually
+    # The tokenizer will handle BOS token automatically if needed
+    # Using add_special_tokens=True is correct for LLaMA models
     inputs = medical_tokenizer(
         prompt, 
         return_tensors="pt",
-        add_special_tokens=True  # Default for LLaMA - adds BOS token automatically
+        add_special_tokens=True,  # Adds BOS token automatically for LLaMA
+        padding=False  # No padding needed for single sequence generation
     )
     
     # Move inputs to the correct device

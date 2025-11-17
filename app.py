@@ -1806,8 +1806,8 @@ def stream_chat(
     
     # Calculate prompt length for stopping criteria
     # Tokenize once to get length (matching the tokenization in model.py)
-    # Use add_special_tokens=True to match model.py tokenization (default for LLaMA)
-    inputs = medical_tokenizer(prompt, return_tensors="pt", add_special_tokens=True)
+    # Use same tokenization settings as model.py: add_special_tokens=True, padding=False
+    inputs = medical_tokenizer(prompt, return_tensors="pt", add_special_tokens=True, padding=False)
     prompt_length = inputs['input_ids'].shape[1]
     logger.debug(f"Prompt length: {prompt_length} tokens")
     
