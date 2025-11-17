@@ -38,54 +38,54 @@ global_medical_tokenizers = {}
 
 
 def initialize_medical_model(model_name: str):
-    """Initialize medical model (MedSwin) - simplified configuration for MedAlpaca-based models
+    """Initialize medical model (MedSwin) - simplified configuration for LLaMA-based models
     
-    Simplified initialization following MedAlpaca best practices:
-    - Use default tokenizer configuration from model
-    - Minimal configuration changes
-    - Ensure proper pad_token setup for LLaMA-based models
+    Following standard LLaMA/MedAlpaca initialization:
+    - Load tokenizer with proper settings
+    - Load model with device_map="auto" for ZeroGPU
+    - Set pad_token correctly for LLaMA models
     """
     global global_medical_models, global_medical_tokenizers
     if model_name not in global_medical_models or global_medical_models[model_name] is None:
         logger.info(f"Initializing medical model: {model_name}...")
         model_path = MEDSWIN_MODELS[model_name]
         
-        # Load tokenizer - use default configuration from the model
-        # MedAlpaca/MedSwin models come with proper tokenizer config
+        # Load tokenizer - standard LLaMA tokenizer setup
         tokenizer = AutoTokenizer.from_pretrained(
             model_path, 
             token=HF_TOKEN,
-            padding_side="left"  # Left padding for causal LM generation
+            use_fast=False  # Use slow tokenizer for better compatibility
         )
         
-        # Only set pad_token if it's missing (use eos_token as pad_token for LLaMA-based models)
+        # LLaMA models don't have pad_token by default, set it to eos_token
         if tokenizer.pad_token is None:
             tokenizer.pad_token = tokenizer.eos_token
             tokenizer.pad_token_id = tokenizer.eos_token_id
         
-        # Load model - simplified configuration
-        # Use default settings from the model, minimal overrides
+        # Load model - use device_map="auto" for ZeroGPU Spaces
         model = AutoModelForCausalLM.from_pretrained(
             model_path,
             device_map="auto",
             trust_remote_code=True,
             token=HF_TOKEN,
-            torch_dtype=torch.float16
+            torch_dtype=torch.float16,
+            low_cpu_mem_usage=True
         )
         
-        # Ensure model is in eval mode (important for inference)
+        # Ensure model is in eval mode
         model.eval()
         
-        # Ensure model config matches tokenizer (only pad_token_id needs to be synced)
-        if hasattr(model.config, 'pad_token_id') and tokenizer.pad_token_id is not None:
+        # Sync pad_token_id between model config and tokenizer
+        if hasattr(model.config, 'pad_token_id'):
             model.config.pad_token_id = tokenizer.pad_token_id
         
         global_medical_models[model_name] = model
         global_medical_tokenizers[model_name] = tokenizer
         logger.info(f"Medical model {model_name} initialized successfully")
         logger.info(f"Model device: {next(model.parameters()).device}")
-        logger.info(f"Tokenizer: pad_token={tokenizer.pad_token}, eos_token={tokenizer.eos_token}, bos_token={tokenizer.bos_token}")
-        logger.info(f"Model vocab size: {len(tokenizer)}")
+        logger.info(f"Tokenizer vocab size: {len(tokenizer)}")
+        logger.info(f"EOS token: {tokenizer.eos_token} (id: {tokenizer.eos_token_id})")
+        logger.info(f"PAD token: {tokenizer.pad_token} (id: {tokenizer.pad_token_id})")
     return global_medical_models[model_name], global_medical_tokenizers[model_name]
 
 
@@ -131,51 +131,37 @@ def generate_with_medswin(
     stopping_criteria: StoppingCriteriaList
 ):
     """
-    Generate text with MedSwin model - simplified inference for MedAlpaca-based models
+    Generate text with MedSwin model - simplified inference for LLaMA-based models
     
-    This function performs tokenization and model inference.
-    The model is already on GPU (initialized with device_map="auto").
-    
-    Simplified approach following MedAlpaca best practices:
-    - Ensure model is in eval mode
-    - Use proper tokenization (no padding for single sequence)
-    - Use standard generation parameters
+    Following standard LLaMA/MedAlpaca inference pattern:
+    - Simple tokenization without truncation
+    - Standard generation parameters
+    - Proper device placement
     """
     # Ensure model is in evaluation mode
     medical_model_obj.eval()
     
-    # Tokenize prompt - simple and clean tokenization
-    # MedAlpaca models expect clean tokenization without special handling
-    inputs = medical_tokenizer(
-        prompt, 
-        return_tensors="pt",
-        padding=False,  # No padding for single sequence
-        truncation=True,  # Truncate if too long (respect model max length)
-        max_length=2048  # Reasonable max length for prompt
-    )
+    # Simple tokenization - no truncation, let model handle special tokens
+    inputs = medical_tokenizer(prompt, return_tensors="pt").to(medical_model_obj.device)
     
-    # Move inputs to the same device as the model
-    device = next(medical_model_obj.parameters()).device
-    inputs = {k: v.to(device) for k, v in inputs.items()}
-    
-    # Prepare generation kwargs - simplified and standard for MedAlpaca models
+    # Prepare generation kwargs - simplified for LLaMA models
     generation_kwargs = {
         "input_ids": inputs["input_ids"],
-        "attention_mask": inputs.get("attention_mask", None),
         "max_new_tokens": max_new_tokens,
         "temperature": temperature,
         "top_p": top_p,
         "top_k": top_k,
         "repetition_penalty": penalty,
         "do_sample": True,
-        "eos_token_id": eos_token_id,
-        "pad_token_id": pad_token_id,
         "streamer": streamer,
-        "stopping_criteria": stopping_criteria
+        "stopping_criteria": stopping_criteria,
+        "eos_token_id": eos_token_id,
+        "pad_token_id": pad_token_id
     }
     
-    # Remove None values to avoid issues
-    generation_kwargs = {k: v for k, v in generation_kwargs.items() if v is not None}
+    # Add attention_mask if it exists
+    if "attention_mask" in inputs:
+        generation_kwargs["attention_mask"] = inputs["attention_mask"]
     
     # Run generation on GPU with torch.no_grad() for efficiency
     with torch.no_grad():

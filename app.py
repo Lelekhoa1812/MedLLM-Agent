@@ -721,18 +721,17 @@ def generate_speech(text: str):
 def format_prompt_manually(messages: list, tokenizer) -> str:
     """Manually format prompt for MedSwin/MedAlpaca-based models
     
-    MedSwin is finetuned from MedAlpaca-7B, which uses the Alpaca instruction format:
-    ### Instruction:
-    {instruction}
-    ### Input:
-    {input}  (optional, can be empty)
-    ### Output:
-    {output}
+    MedSwin is finetuned from MedAlpaca-7B, which uses a simple instruction format:
+    Question: {user_content}
+    Answer:
     
-    For MedAlpaca/MedSwin, the user query is the instruction, and system prompt (if any) 
-    is prepended to the instruction.
+    Or with system prompt:
+    {system_content}
+    
+    Question: {user_content}
+    Answer:
     """
-    # Extract system and user messages
+    # Combine system and user messages into a single instruction
     system_content = ""
     user_content = ""
     
@@ -744,24 +743,16 @@ def format_prompt_manually(messages: list, tokenizer) -> str:
             system_content = content
         elif role == "user":
             user_content = content
-        # Skip assistant messages in history
+        elif role == "assistant":
+            # Skip assistant messages in history for now (can be added if needed)
+            pass
     
-    # Format for MedAlpaca/MedSwin: user query is instruction, system prompt is prepended
-    if system_content and user_content:
-        # Combine system and user: system context + user query as instruction
-        instruction = f"{system_content.strip()}\n\n{user_content.strip()}"
-        prompt = f"### Instruction:\n{instruction}\n\n### Input:\n\n### Output:\n"
-    elif user_content:
-        # Only user content: use as instruction
-        instruction = user_content.strip()
-        prompt = f"### Instruction:\n{instruction}\n\n### Input:\n\n### Output:\n"
-    elif system_content:
-        # Only system content: use as instruction (shouldn't happen normally)
-        instruction = system_content.strip()
-        prompt = f"### Instruction:\n{instruction}\n\n### Input:\n\n### Output:\n"
+    # Format for MedAlpaca/LLaMA-based medical models
+    # Common format: Instruction + Input -> Response
+    if system_content:
+        prompt = f"{system_content}\n\nQuestion: {user_content}\n\nAnswer:"
     else:
-        # Fallback: empty prompt
-        prompt = "### Instruction:\n\n### Input:\n\n### Output:\n"
+        prompt = f"Question: {user_content}\n\nAnswer:"
     
     return prompt
 
@@ -1795,14 +1786,26 @@ def stream_chat(
     max_new_tokens = int(max_new_tokens) if isinstance(max_new_tokens, (int, float)) else 2048
     max_new_tokens = max(max_new_tokens, 1024)  # Minimum 1024 tokens for medical answers
     
-    # Format prompt for MedAlpaca-based models
-    # MedAlpaca models don't have chat templates, so we use manual formatting
-    prompt = format_prompt_manually(messages, medical_tokenizer)
+    # Check if tokenizer has chat template, otherwise format manually
+    if hasattr(medical_tokenizer, 'chat_template') and medical_tokenizer.chat_template is not None:
+        try:
+            prompt = medical_tokenizer.apply_chat_template(
+                messages,
+                tokenize=False,
+                add_generation_prompt=True
+            )
+        except Exception as e:
+            logger.warning(f"Chat template failed, using manual formatting: {e}")
+            # Fallback to manual formatting
+            prompt = format_prompt_manually(messages, medical_tokenizer)
+    else:
+        # Manual formatting for models without chat template
+        prompt = format_prompt_manually(messages, medical_tokenizer)
     
-    # Note: We don't tokenize here - tokenization happens in generate_with_medswin
-    # This prevents double tokenization which causes corrupted output
-    # Calculate prompt length for stopping criteria (approximate, will be recalculated in generate_with_medswin)
-    prompt_length = len(prompt.split())  # Approximate token count
+    # Tokenize to get prompt length for stopping criteria
+    # We'll tokenize again in generate_with_medswin, but this is just for length calculation
+    inputs = medical_tokenizer(prompt, return_tensors="pt")
+    prompt_length = inputs['input_ids'].shape[1]
     
     stop_event = threading.Event()
     
@@ -1814,21 +1817,28 @@ def stream_chat(
         def __call__(self, input_ids, scores, **kwargs):
             return self.stop_event.is_set()
     
-    # Simplified stopping criteria - just stop on EOS token
-    # MedAlpaca models handle EOS properly, we don't need complex logic
+    # Custom stopping criteria that doesn't stop on EOS too early
     class MedicalStoppingCriteria(StoppingCriteria):
-        def __init__(self, eos_token_id):
+        def __init__(self, eos_token_id, prompt_length, min_new_tokens=100):
             super().__init__()
             self.eos_token_id = eos_token_id
-
+            self.prompt_length = prompt_length
+            self.min_new_tokens = min_new_tokens
+            
         def __call__(self, input_ids, scores, **kwargs):
-            # Simply check if the last token is EOS
+            current_length = input_ids.shape[1]
+            new_tokens = current_length - self.prompt_length
             last_token = input_ids[0, -1].item()
+            
+            # Don't stop on EOS if we haven't generated enough new tokens
+            if new_tokens < self.min_new_tokens:
+                return False
+            # Allow EOS after minimum new tokens have been generated
             return last_token == self.eos_token_id
     
     stopping_criteria = StoppingCriteriaList([
         StopOnEvent(stop_event),
-        MedicalStoppingCriteria(eos_token_id)
+        MedicalStoppingCriteria(eos_token_id, prompt_length, min_new_tokens=100)
     ])
     
     streamer = TextIteratorStreamer(
