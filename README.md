@@ -72,7 +72,6 @@ tags:
    - Enable/disable Document RAG
    - Enable/disable Web Search (MCP)
    - Select medical model (MedSwin SFT/KD/TA)
-   - Toggle agentic reasoning on/off for MedSwin-only responses
 3. **Ask Questions**: Type your medical question in any language
 4. **Get Answers**: Receive comprehensive answers based on:
    - Your uploaded documents (if RAG enabled)
@@ -103,33 +102,9 @@ See `requirements.txt` for full dependency list. Key dependencies:
 - **Utilities**: `langdetect`, `gradio`, `spaces`, `soundfile`
 - **TTS**: Optional - `TTS` package (voice features work with MCP fallback if unavailable)
 
-### 🔑 Access Tokens
-
-- **Hugging Face**: Set `HF_TOKEN` so Transformers can download the MedSwin checkpoints. Generate a read-only token at [huggingface.co/settings/tokens](https://huggingface.co/settings/tokens) and export it:
-  ```bash
-  export HF_TOKEN="hf_your_token"
-  ```
-- **Gemini**: `GEMINI_API_KEY` remains required for MCP translation, parsing, transcription, and summarization (see MCP configuration below).
-
 ### 🔌 MCP Configuration
 
-The application uses a bundled Gemini MCP server (agent.py) for translation, document parsing, transcription, and summarization. Configure via environment variables:
-
-```bash
-# Required: Gemini API Key
-export GEMINI_API_KEY="your-gemini-api-key"
-
-# Optional: Gemini MCP Server Configuration (defaults to bundled agent.py)
-export MCP_SERVER_COMMAND="python"
-export MCP_SERVER_ARGS="/path/to/agent.py"  # Default: bundled agent.py
-
-# Optional: Gemini Model Configuration
-export GEMINI_MODEL="gemini-2.5-flash"  # For complex tasks (default)
-export GEMINI_MODEL_LITE="gemini-2.5-flash-lite"  # For simple tasks (default)
-export GEMINI_TIMEOUT=300000  # Request timeout in milliseconds (default: 5 minutes)
-export GEMINI_MAX_OUTPUT_TOKENS=8192  # Maximum output tokens (default)
-export GEMINI_TEMPERATURE=0.2  # Temperature for generation 0-2 (default: 0.2)
-```
+The application uses a bundled Gemini MCP server (agent.py) for translation, document parsing, transcription, and summarization. Configure via environment variables
 
 **Setup Steps:**
 

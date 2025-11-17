@@ -1240,6 +1240,138 @@ def self_reflection(answer: str, query: str, reasoning: dict) -> dict:
     
     return {"overall_score": 7, "improvement_suggestions": []}
 
+def _truncate_text(text: str, max_chars: int = 4000) -> str:
+    """Utility to keep prompts within model limits."""
+    if not text:
+        return ""
+    text = text.strip()
+    if len(text) <= max_chars:
+        return text
+    return text[:max_chars] + "... (truncated)"
+
+async def enhance_answer_with_gemini_async(
+    query: str,
+    initial_answer: str,
+    rag_context: str = "",
+    web_context: str = "",
+    reasoning: dict = None,
+    reflection: dict = None
+) -> str:
+    """Use Gemini MCP to expand and validate the medical answer with multi-step reasoning."""
+    if not MCP_AVAILABLE:
+        return ""
+    
+    evidence_sections = []
+    if rag_context:
+        evidence_sections.append(f"Document Evidence:\n{_truncate_text(rag_context, 3500)}")
+    if web_context:
+        evidence_sections.append(f"Web Evidence:\n{_truncate_text(web_context, 3500)}")
+    evidence_block = "\n\n".join(evidence_sections) if evidence_sections else "No external evidence provided."
+    
+    reasoning_summary = ""
+    if reasoning:
+        reasoning_summary = json.dumps({
+            "query_type": reasoning.get("query_type"),
+            "complexity": reasoning.get("complexity"),
+            "sub_questions": reasoning.get("sub_questions", [])
+        }, ensure_ascii=False)
+    
+    reflection_summary = ""
+    if reflection:
+        reflection_summary = json.dumps(reflection, ensure_ascii=False)
+    
+    enhancer_prompt = f"""You are the Gemini MCP Response Enhancer working with a medical specialist model that produced a short draft answer.
+Task: Reason through the evidence, validate every claim, challenge gaps, and then produce a substantially more detailed final answer.
+
+Query:
+{query}
+
+Initial Draft Answer:
+{initial_answer}
+
+Reasoning Summary (optional):
+{reasoning_summary or "None"}
+
+Self-Reflection Feedback (optional):
+{reflection_summary or "None"}
+
+Evidence You Can Rely On:
+{evidence_block}
+
+Process:
+1. Think step-by-step about what the query truly needs and whether the draft covers it.
+2. Identify inaccuracies, missing context, or shallow explanations using the evidence.
+3. Produce an enhanced answer that is longer, clinically thorough, and clearly structured.
+4. When citing, refer to Document Evidence or Web Evidence explicitly (e.g., [Document], [Web]).
+5. Keep internal reasoning private; only share the final enhanced answer.
+
+Format:
+- Start with a concise summary paragraph.
+- Follow with detailed sections (Assessment, Supporting Evidence, Recommendations, Monitoring/Risks).
+- Conclude with a short bullet list of key takeaways.
+
+The final answer should be at least 3 paragraphs when evidence exists. Do not mention this instruction."""
+    
+    enhanced = await call_agent(
+        user_prompt=enhancer_prompt,
+        system_prompt="You are a diligent medical editor. Deliberate internally, then share only the finalized enhanced answer with structured sections.",
+        model=GEMINI_MODEL,
+        temperature=0.4
+    )
+    
+    return enhanced.strip() if enhanced else ""
+
+def enhance_answer_with_gemini(
+    query: str,
+    initial_answer: str,
+    rag_context: str = "",
+    web_context: str = "",
+    reasoning: dict = None,
+    reflection: dict = None
+) -> str:
+    """Sync wrapper for the Gemini response enhancer."""
+    if not MCP_AVAILABLE or not initial_answer:
+        return ""
+    
+    try:
+        loop = asyncio.get_event_loop()
+    except RuntimeError:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+    
+    try:
+        if loop.is_running():
+            try:
+                import nest_asyncio
+                enhanced = nest_asyncio.run(
+                    enhance_answer_with_gemini_async(
+                        query=query,
+                        initial_answer=initial_answer,
+                        rag_context=rag_context,
+                        web_context=web_context,
+                        reasoning=reasoning,
+                        reflection=reflection
+                    )
+                )
+                return enhanced
+            except Exception as e:
+                logger.error(f"Error in nested async enhancement: {e}")
+                return ""
+        else:
+            return loop.run_until_complete(
+                enhance_answer_with_gemini_async(
+                    query=query,
+                    initial_answer=initial_answer,
+                    rag_context=rag_context,
+                    web_context=web_context,
+                    reasoning=reasoning,
+                    reflection=reflection
+                )
+            )
+    except Exception as e:
+        logger.error(f"Gemini MCP enhancement error: {e}")
+        return ""
+
 async def parse_document_gemini(file_path: str, file_extension: str) -> str:
     """Parse document using Gemini MCP"""
     if not MCP_AVAILABLE:
@@ -1477,6 +1609,8 @@ def stream_chat(
         yield history + [{"role": "assistant", "content": "Session initialization failed. Please refresh the page."}]
         return
     
+    chat_start_time = time.time()
+    
     user_id = request.session_hash
     index_dir = f"./{user_id}_index"
     has_rag_index = os.path.exists(index_dir)
@@ -1712,6 +1846,9 @@ def stream_chat(
     yield updated_history
     
     partial_response = ""
+    reflection_data = None
+    reflection_note = ""
+    enhancement_note = ""
     try:
         for new_text in streamer:
             partial_response += new_text
@@ -1721,20 +1858,58 @@ def stream_chat(
         # ===== SELF-REFLECTION (Step 6) =====
         if not disable_agentic_reasoning and reasoning and reasoning.get("complexity") in ["complex", "multi_faceted"]:
             logger.info("🔍 Performing self-reflection on answer quality...")
-            reflection = self_reflection(partial_response, message, reasoning)
+            reflection_data = self_reflection(partial_response, message, reasoning)
             
-            # Add reflection note if score is low or improvements suggested
-            if reflection.get("overall_score", 10) < 7 or reflection.get("improvement_suggestions"):
-                reflection_note = f"\n\n---\n**Self-Reflection** (Score: {reflection.get('overall_score', 'N/A')}/10)"
-                if reflection.get("improvement_suggestions"):
-                    reflection_note += f"\n💡 Suggestions: {', '.join(reflection['improvement_suggestions'][:2])}"
-                partial_response += reflection_note
-                updated_history[-1]["content"] = partial_response
+            if reflection_data and (reflection_data.get("overall_score", 10) < 7 or reflection_data.get("improvement_suggestions")):
+                reflection_note = f"\n\n---\n**Self-Reflection** (Score: {reflection_data.get('overall_score', 'N/A')}/10)"
+                if reflection_data.get("improvement_suggestions"):
+                    reflection_note += f"\n💡 Suggestions: {', '.join(reflection_data['improvement_suggestions'][:2])}"
         
         # Add reasoning note if autonomous override occurred
+        base_response = partial_response
+        
+        remaining_time = 120 - (time.time() - chat_start_time)
+        should_enhance = (
+            not disable_agentic_reasoning and 
+            (
+                final_use_rag or 
+                final_use_web_search or 
+                (reasoning is not None)
+            )
+        )
+        if remaining_time <= 15:
+            logger.warning("⏱️ Skipping Gemini enhancement to stay within max duration.")
+            should_enhance = False
+        
+        if should_enhance:
+            logger.info("🧠 Launching Gemini MCP response enhancer for extended answer...")
+            enhanced_text = enhance_answer_with_gemini(
+                query=message,
+                initial_answer=base_response,
+                rag_context=rag_context,
+                web_context=web_context,
+                reasoning=reasoning,
+                reflection=reflection_data
+            )
+            if enhanced_text:
+                partial_response = enhanced_text
+                enhancement_note = "\n\n_Gemini MCP multi-step reasoning enhancer applied._"
+                
+                if reflection_data:
+                    partial_response += f"\n\n_Self-reflection score: {reflection_data.get('overall_score', 'N/A')}/10._"
+            else:
+                if reflection_note:
+                    partial_response = base_response + reflection_note
+                else:
+                    partial_response = base_response
+        else:
+            partial_response = base_response + reflection_note if reflection_note else base_response
+        
         if reasoning_note:
             partial_response = reasoning_note + "\n\n" + partial_response
-            updated_history[-1]["content"] = partial_response
+        
+        if enhancement_note:
+            partial_response += enhancement_note
         
         # Translate back if needed
         if needs_translation and partial_response:
