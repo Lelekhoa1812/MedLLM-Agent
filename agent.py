@@ -202,18 +202,46 @@ async def call_tool(name: str, arguments: dict) -> Sequence[TextContent | ImageC
             
             # Generate content using Gemini API
             try:
+                # Get the model instance
+                gemini_model = gemini_client.models.get(model)
+                
+                # Prepare generation config
+                generation_config = {
+                    "temperature": temperature,
+                    "max_output_tokens": GEMINI_MAX_OUTPUT_TOKENS
+                }
+                
                 # Use asyncio.to_thread to make the blocking call async
-                # The API accepts contents as a list
-                response = await asyncio.to_thread(
-                    gemini_client.models.generate_content,
-                    model=model,
-                    contents=gemini_contents
-                )
+                # The API accepts contents as a list and config as a separate parameter
+                def generate_sync():
+                    return gemini_model.generate_content(
+                        contents=gemini_contents,
+                        config=generation_config
+                    )
+                
+                response = await asyncio.to_thread(generate_sync)
                 
                 # Extract text from response
                 if response and hasattr(response, 'text') and response.text:
+                    logger.info(f"✅ Gemini generated content successfully ({len(response.text)} chars)")
                     return [TextContent(type="text", text=response.text)]
+                elif response and hasattr(response, 'candidates') and response.candidates:
+                    # Try to extract text from candidates
+                    text_parts = []
+                    for candidate in response.candidates:
+                        if hasattr(candidate, 'content') and hasattr(candidate.content, 'parts'):
+                            for part in candidate.content.parts:
+                                if hasattr(part, 'text'):
+                                    text_parts.append(part.text)
+                    if text_parts:
+                        text = ''.join(text_parts)
+                        logger.info(f"✅ Gemini generated content successfully ({len(text)} chars)")
+                        return [TextContent(type="text", text=text)]
+                    else:
+                        logger.warning("Gemini returned response but no text found")
+                        return [TextContent(type="text", text="Error: No text in Gemini response")]
                 else:
+                    logger.warning("Gemini returned empty response")
                     return [TextContent(type="text", text="Error: No response from Gemini")]
                     
             except Exception as e:
