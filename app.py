@@ -1865,9 +1865,9 @@ def stream_chat(
     needs_translation = original_lang != "en"
     
     if needs_translation:
-    logger.info(f"[GEMINI SUPERVISOR] Detected non-English language: {original_lang}, translating...")
-        message = translate_text(message, target_lang="en", source_lang=original_lang)
-    logger.info(f"[GEMINI SUPERVISOR] Translated query: {message[:100]}...")
+        logger.info(f"[GEMINI SUPERVISOR] Detected non-English language: {original_lang}, translating...")
+            message = translate_text(message, target_lang="en", source_lang=original_lang)
+        logger.info(f"[GEMINI SUPERVISOR] Translated query: {message[:100]}...")
     
     # Determine final modes (respect user settings and availability)
     final_use_rag = use_rag and has_rag_index and not disable_agentic_reasoning
