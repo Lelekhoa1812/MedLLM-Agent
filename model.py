@@ -38,35 +38,27 @@ global_medical_tokenizers = {}
 
 
 def initialize_medical_model(model_name: str):
-    """Initialize medical model (MedSwin) - following standard LLaMA/MedAlpaca initialization
-    Key points:
-    - Load tokenizer with proper settings for LLaMA-based models
-    - Load model with device_map="auto" for ZeroGPU Spaces
-    - Set pad_token correctly (LLaMA models don't have pad_token by default)
-    - Use float16 for memory efficiency
+    """Initialize medical model (MedSwin) - download on demand
+    
+    Following standard MedAlpaca/LLaMA initialization pattern:
+    - Simple tokenizer loading without over-complication
+    - Model loading with device_map="auto" for ZeroGPU Spaces
+    - Proper pad_token setup for LLaMA-based models
+    - Float16 for memory efficiency
     """
     global global_medical_models, global_medical_tokenizers
+    
     if model_name not in global_medical_models or global_medical_models[model_name] is None:
         logger.info(f"Initializing medical model: {model_name}...")
         model_path = MEDSWIN_MODELS[model_name]
         
-        # Load tokenizer - use fast tokenizer for better performance
-        tokenizer = AutoTokenizer.from_pretrained(
-            model_path, 
-            token=HF_TOKEN,
-            use_fast=True  # Use fast tokenizer for better performance
-        )
+        # Load tokenizer - simple and clean, following example pattern
+        tokenizer = AutoTokenizer.from_pretrained(model_path, token=HF_TOKEN)
         
         # LLaMA models don't have pad_token by default, set it to eos_token
         if tokenizer.pad_token is None:
             tokenizer.pad_token = tokenizer.eos_token
             tokenizer.pad_token_id = tokenizer.eos_token_id
-        
-        # CRITICAL: Set padding_side to "right" for generation
-        # Left padding is only for batch training. For generation, we need right padding
-        # so the model generates correctly from left to right
-        tokenizer.padding_side = "right"
-        logger.info(f"Tokenizer padding_side set to: {tokenizer.padding_side}")
         
         # Load model - use device_map="auto" for ZeroGPU Spaces
         model = AutoModelForCausalLM.from_pretrained(
@@ -74,21 +66,11 @@ def initialize_medical_model(model_name: str):
             device_map="auto",
             trust_remote_code=True,
             token=HF_TOKEN,
-            torch_dtype=torch.float16,
-            low_cpu_mem_usage=True
+            torch_dtype=torch.float16
         )
         
         # Ensure model is in eval mode
         model.eval()
-        
-        # Sync pad_token_id between model config and tokenizer
-        # This is critical for proper generation
-        if hasattr(model.config, 'pad_token_id'):
-            model.config.pad_token_id = tokenizer.pad_token_id
-        if hasattr(model.config, 'bos_token_id') and tokenizer.bos_token_id is not None:
-            model.config.bos_token_id = tokenizer.bos_token_id
-        if hasattr(model.config, 'eos_token_id') and tokenizer.eos_token_id is not None:
-            model.config.eos_token_id = tokenizer.eos_token_id
         
         global_medical_models[model_name] = model
         global_medical_tokenizers[model_name] = tokenizer
@@ -97,6 +79,7 @@ def initialize_medical_model(model_name: str):
         logger.info(f"Tokenizer vocab size: {len(tokenizer)}")
         logger.info(f"EOS token: {tokenizer.eos_token} (id: {tokenizer.eos_token_id})")
         logger.info(f"PAD token: {tokenizer.pad_token} (id: {tokenizer.pad_token_id})")
+    
     return global_medical_models[model_name], global_medical_tokenizers[model_name]
 
 
@@ -142,10 +125,10 @@ def generate_with_medswin(
     stopping_criteria: StoppingCriteriaList
 ):
     """
-    Generate text with MedSwin model - following standard LLaMA/MedAlpaca inference pattern
+    Generate text with MedSwin model - following standard MedAlpaca/LLaMA inference pattern
     
-    Key fixes for corrupted output:
-    - Proper tokenization without double tokenization
+    Key points for proper generation:
+    - Simple tokenization without over-complication
     - Correct device placement for ZeroGPU
     - Standard generation kwargs for LLaMA-based models
     - Proper handling of special tokens
@@ -153,47 +136,31 @@ def generate_with_medswin(
     # Ensure model is in evaluation mode
     medical_model_obj.eval()
     
-    # Get device - handle device_map="auto" case where model might be on multiple devices
-    # For device_map="auto", get device from first parameter
+    # Get device - handle device_map="auto" case
     device = next(medical_model_obj.parameters()).device
     
-    # Tokenize prompt - For LLaMA-based models, we should NOT add special tokens manually
-    # The tokenizer will handle BOS token automatically if needed
-    # Using add_special_tokens=True is correct for LLaMA models
-    inputs = medical_tokenizer(
-        prompt, 
-        return_tensors="pt",
-        add_special_tokens=True,  # Adds BOS token automatically for LLaMA
-        padding=False  # No padding needed for single sequence generation
-    )
-    
-    # Move inputs to the correct device
-    inputs = {k: v.to(device) for k, v in inputs.items()}
+    # Tokenize prompt - simple and clean, following example pattern
+    # For LLaMA-based models, tokenizer handles special tokens automatically
+    inputs = medical_tokenizer(prompt, return_tensors="pt").to(device)
     
     # Log tokenization info for debugging
     prompt_length = inputs['input_ids'].shape[1]
     logger.info(f"Tokenized prompt: {prompt_length} tokens on device {device}")
-    logger.debug(f"First few token IDs: {inputs['input_ids'][0][:10].tolist()}")
-    logger.debug(f"Last few token IDs: {inputs['input_ids'][0][-10:].tolist()}")
     
-    # Prepare generation kwargs - following standard LLaMA/MedAlpaca pattern
-    generation_kwargs = {
-        "input_ids": inputs["input_ids"],
-        "max_new_tokens": max_new_tokens,
-        "temperature": temperature,
-        "top_p": top_p,
-        "top_k": top_k,
-        "repetition_penalty": penalty,
-        "do_sample": True,
-        "streamer": streamer,
-        "stopping_criteria": stopping_criteria,
-        "eos_token_id": eos_token_id,
-        "pad_token_id": pad_token_id
-    }
-    
-    # Add attention_mask if it exists (important for proper generation)
-    if "attention_mask" in inputs:
-        generation_kwargs["attention_mask"] = inputs["attention_mask"]
+    # Prepare generation kwargs - following standard MedAlpaca/LLaMA pattern
+    generation_kwargs = dict(
+        inputs,
+        streamer=streamer,
+        max_new_tokens=max_new_tokens,
+        temperature=temperature,
+        top_p=top_p,
+        top_k=top_k,
+        repetition_penalty=penalty,
+        do_sample=True,
+        stopping_criteria=stopping_criteria,
+        eos_token_id=eos_token_id,
+        pad_token_id=pad_token_id
+    )
     
     # Run generation on GPU with torch.no_grad() for efficiency
     with torch.no_grad():

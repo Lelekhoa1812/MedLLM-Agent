@@ -719,14 +719,12 @@ def generate_speech(text: str):
         return None
 
 def format_prompt_manually(messages: list, tokenizer) -> str:
-    """Manually format prompt for MedSwin/MedAlpaca-based models
+    """Manually format prompt for models without chat template
     
-    MedSwin is finetuned from MedAlpaca-7B, which uses a simple instruction format.
-    Following standard MedAlpaca format from the example:
+    Following the exact example pattern from MedAlpaca documentation:
     - Simple Question/Answer format
     - System prompt as instruction context
     - Clean formatting without extra special tokens
-    - No BOS/EOS tokens added manually (tokenizer handles this)
     """
     # Combine system and user messages into a single instruction
     system_content = ""
@@ -745,13 +743,11 @@ def format_prompt_manually(messages: list, tokenizer) -> str:
             pass
     
     # Format for MedAlpaca/LLaMA-based medical models
-    # Following the example format: Instruction + Question -> Answer
-    # This is the standard format that MedAlpaca models expect
+    # Common format: Instruction + Input -> Response
+    # Following the exact example pattern
     if system_content:
-        # Include system prompt as instruction context
         prompt = f"{system_content}\n\nQuestion: {user_content}\n\nAnswer:"
     else:
-        # Simple question-answer format
         prompt = f"Question: {user_content}\n\nAnswer:"
     
     return prompt
@@ -1788,7 +1784,7 @@ def stream_chat(
     
     # Format prompt - MedAlpaca/MedSwin models typically don't have chat templates
     # Use manual formatting for consistent behavior
-    # CRITICAL: MedAlpaca/MedSwin models need simple, clean prompt formatting
+    # Following the example: check if tokenizer has chat template, otherwise format manually
     if hasattr(medical_tokenizer, 'chat_template') and medical_tokenizer.chat_template is not None:
         try:
             prompt = medical_tokenizer.apply_chat_template(
@@ -1801,13 +1797,12 @@ def stream_chat(
             # Fallback to manual formatting
             prompt = format_prompt_manually(messages, medical_tokenizer)
     else:
-        # Manual formatting for models without chat template (MedAlpaca/MedSwin)
+        # Manual formatting for models without chat template
         prompt = format_prompt_manually(messages, medical_tokenizer)
     
     # Calculate prompt length for stopping criteria
-    # Tokenize once to get length (matching the tokenization in model.py)
-    # Use same tokenization settings as model.py: add_special_tokens=True, padding=False
-    inputs = medical_tokenizer(prompt, return_tensors="pt", add_special_tokens=True, padding=False)
+    # Tokenize to get length - use same tokenization as model.py (simple, no extra params)
+    inputs = medical_tokenizer(prompt, return_tensors="pt")
     prompt_length = inputs['input_ids'].shape[1]
     logger.debug(f"Prompt length: {prompt_length} tokens")
     
