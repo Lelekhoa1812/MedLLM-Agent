@@ -16,7 +16,8 @@ from pathlib import Path
 
 # MCP imports
 try:
-    from mcp.server import Server
+    from mcp import types as mcp_types
+    from mcp.server import Server, NotificationOptions
     from mcp.types import Tool, TextContent, ImageContent, EmbeddedResource
     from mcp.server.models import InitializationOptions
 except ImportError:
@@ -285,12 +286,17 @@ async def main():
             # Prepare server capabilities for initialization
             try:
                 if hasattr(app, "get_capabilities"):
-                    server_capabilities = app.get_capabilities()
+                    notification_options = NotificationOptions()
+                    experimental_capabilities: dict[str, dict[str, Any]] = {}
+                    server_capabilities = app.get_capabilities(
+                        notification_options=notification_options,
+                        experimental_capabilities=experimental_capabilities,
+                    )
                 else:
-                    server_capabilities = {}
+                    server_capabilities = mcp_types.ServerCapabilities()
             except Exception as cap_error:
                 logger.warning(f"Failed to gather server capabilities: {cap_error}")
-                server_capabilities = {}
+                server_capabilities = mcp_types.ServerCapabilities()
 
             init_options = InitializationOptions(
                 server_name="gemini-mcp-server",

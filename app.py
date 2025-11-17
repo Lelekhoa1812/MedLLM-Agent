@@ -43,8 +43,10 @@ mcp_client_logger.setLevel(logging.WARNING)
 hf_logging.set_verbosity_error()
 
 # MCP imports
+MCP_CLIENT_INFO = None
 try:
     from mcp import ClientSession, StdioServerParameters
+    from mcp import types as mcp_types
     from mcp.client.stdio import stdio_client
     import asyncio
     try:
@@ -52,8 +54,11 @@ try:
         nest_asyncio.apply()  # Allow nested event loops
     except ImportError:
         pass  # nest_asyncio is optional
-    
     MCP_AVAILABLE = True
+    MCP_CLIENT_INFO = mcp_types.Implementation(
+        name="MedLLM-Agent",
+        version=os.environ.get("SPACE_VERSION", "local"),
+    )
 except ImportError as e:
     logger.warning(f"MCP SDK not available: {e}")
     MCP_AVAILABLE = False
@@ -265,7 +270,11 @@ async def get_mcp_session():
         read, write = await stdio_ctx.__aenter__()
         
         # Create ClientSession from the streams
-        session = ClientSession(read, write)
+        session = ClientSession(
+            read,
+            write,
+            client_info=MCP_CLIENT_INFO,
+        )
         
         # Initialize the session (this sends initialize request and waits for response + initialized notification)
         # The __aenter__() method handles the complete initialization handshake:
@@ -279,7 +288,11 @@ async def get_mcp_session():
             # including waiting for the server's initialized notification
             # This is a blocking call that completes only after the server sends initialized
             await session.__aenter__()
-            logger.info("✅ MCP session initialized")
+            init_result = await session.initialize()
+            server_info = getattr(init_result, "serverInfo", None)
+            server_name = getattr(server_info, "name", "unknown")
+            server_version = getattr(server_info, "version", "unknown")
+            logger.info(f"✅ MCP session initialized (server={server_name} v{server_version})")
         except Exception as e:
             error_msg = str(e)
             error_type = type(e).__name__
@@ -287,8 +300,12 @@ async def get_mcp_session():
             
             # Clean up and return None
             try:
+                await session.__aexit__(None, None, None)
+            except Exception:
+                pass
+            try:
                 await stdio_ctx.__aexit__(None, None, None)
-            except:
+            except Exception:
                 pass
             return None
         
@@ -317,25 +334,12 @@ async def call_agent(user_prompt: str, system_prompt: str = None, files: list = 
             logger.warning("Failed to get MCP session for Gemini call")
             return ""
         
-        # List tools - session should be ready after proper initialization
-        # Add a small delay to ensure server has fully processed initialization
-        await asyncio.sleep(0.1)
+        # List tools - session is fully initialized via ClientSession.initialize()
         try:
             tools = await session.list_tools()
         except Exception as e:
-            error_msg = str(e)
-            # Check if it's an initialization error
-            if "initialization" in error_msg.lower() or "before initialization" in error_msg.lower():
-                logger.warning(f"⚠️ Server not ready yet, waiting a bit more...: {error_msg}")
-                await asyncio.sleep(0.5)
-                try:
-                    tools = await session.list_tools()
-                except Exception as retry_error:
-                    logger.error(f"❌ Failed to list MCP tools after retry: {retry_error}")
-                    return ""
-            else:
-                logger.error(f"❌ Failed to list MCP tools: {error_msg}")
-                return ""
+            logger.error(f"❌ Failed to list MCP tools: {e}")
+            return ""
         
         if not tools or not hasattr(tools, 'tools'):
             logger.error("Invalid tools response from MCP server")
