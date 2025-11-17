@@ -200,12 +200,12 @@ global_mcp_session = None
 global_mcp_stdio_ctx = None  # Store stdio context to keep it alive
 global_mcp_lock = threading.Lock()  # Lock for thread-safe session access
 # MCP server configuration via environment variables
-# Gemini MCP server: aistudio-mcp-server (Python package)
-# Install with: pip install aistudio-mcp-server
-# Example: MCP_SERVER_COMMAND="python" MCP_SERVER_ARGS="-m aistudio_mcp_server"
-# Or: MCP_SERVER_COMMAND="aistudio-mcp-server" MCP_SERVER_ARGS=""
+# Gemini MCP server: mcp-server (PyPI package)
+# Install with: pip install mcp-server
+# Example: MCP_SERVER_COMMAND="python" MCP_SERVER_ARGS="-m mcp_server"
+# Or use npx for Node.js version: MCP_SERVER_COMMAND="npx" MCP_SERVER_ARGS="-y @modelcontextprotocol/server-gemini"
 MCP_SERVER_COMMAND = os.environ.get("MCP_SERVER_COMMAND", "python")
-MCP_SERVER_ARGS = os.environ.get("MCP_SERVER_ARGS", "-m aistudio_mcp_server").split() if os.environ.get("MCP_SERVER_ARGS") else ["-m", "aistudio_mcp_server"]
+MCP_SERVER_ARGS = os.environ.get("MCP_SERVER_ARGS", "-m mcp_server").split() if os.environ.get("MCP_SERVER_ARGS") else ["-m", "mcp_server"]
 
 async def get_mcp_session():
     """Get or create MCP client session with proper context management"""
@@ -563,6 +563,27 @@ def detect_language(text: str) -> str:
     except LangDetectException:
         return "en"  # Default to English if detection fails
 
+def format_url_as_domain(url: str) -> str:
+    """Format URL as simple domain name (e.g., www.mayoclinic.org)"""
+    if not url:
+        return ""
+    try:
+        from urllib.parse import urlparse
+        parsed = urlparse(url)
+        domain = parsed.netloc or parsed.path
+        # Remove www. prefix if present, but keep it for display
+        if domain.startswith('www.'):
+            return domain
+        elif domain:
+            return domain
+        return url
+    except Exception:
+        # Fallback: try to extract domain manually
+        if '://' in url:
+            domain = url.split('://')[1].split('/')[0]
+            return domain
+        return url
+
 async def translate_text_gemini(text: str, target_lang: str = "en", source_lang: str = None) -> str:
     """Translate text using Gemini MCP"""
     if source_lang:
@@ -787,7 +808,8 @@ def search_web_fallback(query: str, max_results: int = 5) -> list:
         return []
 
 def search_web(query: str, max_results: int = 5) -> list:
-    """Search web using MCP tools (synchronous wrapper)"""
+    """Search web using MCP tools (synchronous wrapper) - prioritizes MCP over direct ddgs"""
+    # Always try MCP first if available
     if MCP_AVAILABLE:
         try:
             # Run async MCP search
@@ -801,20 +823,27 @@ def search_web(query: str, max_results: int = 5) -> list:
                 # If loop is already running, use nest_asyncio or create new thread
                 try:
                     import nest_asyncio
-                    return nest_asyncio.run(search_web_mcp(query, max_results))
+                    results = nest_asyncio.run(search_web_mcp(query, max_results))
+                    if results:  # Only return if we got results from MCP
+                        return results
                 except (ImportError, AttributeError):
                     # Fallback: run in thread
                     import concurrent.futures
                     with concurrent.futures.ThreadPoolExecutor() as executor:
                         future = executor.submit(asyncio.run, search_web_mcp(query, max_results))
-                        return future.result(timeout=30)
+                        results = future.result(timeout=30)
+                        if results:  # Only return if we got results from MCP
+                            return results
             else:
-                return loop.run_until_complete(search_web_mcp(query, max_results))
+                results = loop.run_until_complete(search_web_mcp(query, max_results))
+                if results:  # Only return if we got results from MCP
+                    return results
         except Exception as e:
             logger.error(f"Error running async MCP search: {e}")
-            return search_web_fallback(query, max_results)
-    else:
-        return search_web_fallback(query, max_results)
+    
+    # Only use ddgs fallback if MCP is not available or returned no results
+    logger.warning("Falling back to direct ddgs search (MCP unavailable or returned no results)")
+    return search_web_fallback(query, max_results)
 
 async def summarize_web_content_gemini(content_list: list, query: str) -> str:
     """Summarize web search results using Gemini MCP"""
@@ -1474,6 +1503,7 @@ def stream_chat(
     # ===== EXECUTION: Web Search (Step 3) =====
     web_context = ""
     web_sources = []
+    web_urls = []  # Store URLs for citations
     if final_use_web_search:
         logger.info("🌐 Performing web search (MCP)...")
         web_results = search_web(message, max_results=5)
@@ -1481,6 +1511,8 @@ def stream_chat(
             web_summary = summarize_web_content(web_results, message)
             web_context = f"\n\nAdditional Web Sources (MCP):\n{web_summary}"
             web_sources = [r['title'] for r in web_results[:3]]
+            # Extract unique URLs for citations
+            web_urls = [r.get('url', '') for r in web_results if r.get('url')]
             logger.info(f"Web search completed, found {len(web_results)} results")
     
     # Build final context
@@ -1631,9 +1663,24 @@ def stream_chat(
             translated_response = translate_text(partial_response, target_lang=original_lang, source_lang="en")
             partial_response = translated_response
         
-        # Add speaker icon to assistant message
+        # Add citations if web sources were used
+        citations_text = ""
+        if web_urls:
+            # Get unique domains
+            unique_urls = list(dict.fromkeys(web_urls))  # Preserve order, remove duplicates
+            citation_links = []
+            for url in unique_urls[:5]:  # Limit to 5 citations
+                domain = format_url_as_domain(url)
+                if domain:
+                    # Create markdown link: [domain](url)
+                    citation_links.append(f"[{domain}]({url})")
+            
+            if citation_links:
+                citations_text = "\n\n**Sources:** " + ", ".join(citation_links)
+        
+        # Add speaker icon and citations to assistant message
         speaker_icon = ' 🔊'
-        partial_response_with_speaker = partial_response + speaker_icon
+        partial_response_with_speaker = partial_response + citations_text + speaker_icon
         updated_history[-1]["content"] = partial_response_with_speaker
         
         yield updated_history
