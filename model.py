@@ -44,6 +44,24 @@ def initialize_medical_model(model_name: str):
         logger.info(f"Initializing medical model: {model_name}...")
         model_path = MEDSWIN_MODELS[model_name]
         tokenizer = AutoTokenizer.from_pretrained(model_path, token=HF_TOKEN)
+        
+        # Fix tokenizer configuration for MedSwin/MedAlpaca-based models
+        # These models need proper pad_token and eos_token configuration
+        if tokenizer.pad_token is None:
+            # Use eos_token as pad_token if pad_token is not set
+            if tokenizer.eos_token is not None:
+                tokenizer.pad_token = tokenizer.eos_token
+                tokenizer.pad_token_id = tokenizer.eos_token_id
+            else:
+                # Fallback: add a pad token
+                tokenizer.add_special_tokens({'pad_token': '[PAD]'})
+                tokenizer.pad_token_id = tokenizer.convert_tokens_to_ids('[PAD]')
+        
+        # Ensure eos_token is set
+        if tokenizer.eos_token is None:
+            tokenizer.eos_token = "</s>"
+            tokenizer.eos_token_id = tokenizer.convert_tokens_to_ids("</s>")
+        
         model = AutoModelForCausalLM.from_pretrained(
             model_path,
             device_map="auto",
@@ -51,9 +69,16 @@ def initialize_medical_model(model_name: str):
             token=HF_TOKEN,
             torch_dtype=torch.float16
         )
+        
+        # Resize model embeddings if we added new tokens
+        if tokenizer.pad_token_id != model.config.pad_token_id:
+            model.resize_token_embeddings(len(tokenizer))
+            model.config.pad_token_id = tokenizer.pad_token_id
+        
         global_medical_models[model_name] = model
         global_medical_tokenizers[model_name] = tokenizer
         logger.info(f"Medical model {model_name} initialized successfully")
+        logger.info(f"Tokenizer config: pad_token={tokenizer.pad_token}, eos_token={tokenizer.eos_token}")
     return global_medical_models[model_name], global_medical_tokenizers[model_name]
 
 

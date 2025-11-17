@@ -281,31 +281,42 @@ async def get_mcp_session():
         stdio_ctx = stdio_client(server_params)
         read, write = await stdio_ctx.__aenter__()
         
-        # Create ClientSession from the streams
-        # The __aenter__() method automatically handles the initialization handshake
-        session = ClientSession(read, write)
-        
-        # Wait longer for the server process to fully start
+        # Wait for the server process to fully start
         # The server needs time to: start Python, import modules, initialize Gemini client, start MCP server
         logger.info("⏳ Waiting for MCP server process to start...")
-        await asyncio.sleep(3.0)  # Increased wait for server process startup
+        await asyncio.sleep(2.0)  # Wait for server process startup
+        
+        # Create ClientSession from the streams with client info
+        # ClientSession handles initialization automatically when used as context manager
+        try:
+            from mcp.types import ClientInfo
+            client_info = ClientInfo(
+                name="medllm-agent",
+                version="1.0.0"
+            )
+            session = ClientSession(read, write, client_info=client_info)
+        except (ImportError, TypeError):
+            # Fallback if ClientInfo is not available or not needed
+            session = ClientSession(read, write)
         
         try:
             # Initialize the session (this sends initialize request and waits for response)
+            # The MCP SDK ClientSession.__aenter__() handles the full initialization handshake
             logger.info("🔄 Initializing MCP session...")
             await session.__aenter__()
             logger.info("✅ MCP session initialized, verifying tools...")
         except Exception as e:
-            logger.warning(f"MCP session initialization had an issue (may be expected): {e}")
-            # Continue anyway - the session might still work
+            logger.warning(f"MCP session initialization had an issue: {e}")
+            import traceback
+            logger.debug(traceback.format_exc())
+            # Try to continue - the session might still work
         
-        # Wait longer for the server to be fully ready after initialization
-        # The server needs time to process the initialization and be ready for requests
-        await asyncio.sleep(2.0)  # Wait after initialization
+        # Wait for the server to be fully ready after initialization
+        await asyncio.sleep(1.0)  # Wait after initialization
         
         # Verify the session works by listing tools with retries
         # This confirms the server is ready to handle requests
-        max_init_retries = 15
+        max_init_retries = 10
         tools_listed = False
         tools = None
         last_error = None
@@ -316,6 +327,12 @@ async def get_mcp_session():
                     logger.info(f"✅ MCP server ready with {len(tools.tools)} tools: {[t.name for t in tools.tools]}")
                     tools_listed = True
                     break
+                elif tools and hasattr(tools, 'tools'):
+                    # Empty tools list - might be a server issue
+                    logger.warning(f"MCP server returned empty tools list (attempt {init_attempt + 1}/{max_init_retries})")
+                    if init_attempt < max_init_retries - 1:
+                        await asyncio.sleep(1.0)
+                        continue
             except Exception as e:
                 last_error = e
                 error_str = str(e).lower()
@@ -324,8 +341,10 @@ async def get_mcp_session():
                 # Log the actual error for debugging
                 if init_attempt == 0:
                     logger.debug(f"First list_tools attempt failed: {error_msg}")
+                elif init_attempt < 3:
+                    logger.debug(f"list_tools attempt {init_attempt + 1} failed: {error_msg}")
                 
-                # Ignore initialization-related errors during the handshake phase
+                # Handle different error types
                 if "initialization" in error_str or "before initialization" in error_str or "not initialized" in error_str:
                     if init_attempt < max_init_retries - 1:
                         wait_time = 0.5 * (init_attempt + 1)  # Progressive wait: 0.5s, 1s, 1.5s...
@@ -333,18 +352,25 @@ async def get_mcp_session():
                         await asyncio.sleep(wait_time)
                         continue
                 elif "invalid request" in error_str or "invalid request parameters" in error_str:
-                    # This might be a timing issue - wait and retry
+                    # Invalid request might mean the server isn't ready yet or there's a protocol issue
                     if init_attempt < max_init_retries - 1:
-                        wait_time = 0.8 * (init_attempt + 1)  # Longer wait for invalid request errors
+                        wait_time = 1.0 * (init_attempt + 1)  # Longer wait for invalid request errors
                         logger.debug(f"Invalid request error (attempt {init_attempt + 1}/{max_init_retries}), waiting {wait_time}s...")
                         await asyncio.sleep(wait_time)
                         continue
+                    else:
+                        # Last attempt failed - log detailed error
+                        logger.error(f"❌ Invalid request parameters error persists. This may indicate a protocol mismatch.")
+                        import traceback
+                        logger.debug(traceback.format_exc())
                 elif init_attempt < max_init_retries - 1:
                     wait_time = 0.5 * (init_attempt + 1)
                     logger.debug(f"Tool listing attempt {init_attempt + 1}/{max_init_retries} failed: {error_msg}, waiting {wait_time}s...")
                     await asyncio.sleep(wait_time)
                 else:
                     logger.error(f"❌ Could not list tools after {max_init_retries} attempts. Last error: {error_msg}")
+                    import traceback
+                    logger.debug(traceback.format_exc())
                     # Don't continue - if we can't list tools, the session is not usable
                     try:
                         await session.__aexit__(None, None, None)
@@ -656,9 +682,7 @@ def generate_speech(text: str):
         return None
 
 def format_prompt_manually(messages: list, tokenizer) -> str:
-    """Manually format prompt for models without chat template"""
-    prompt_parts = []
-    
+    """Manually format prompt for MedSwin/MedAlpaca-based models without chat template"""
     # Combine system and user messages into a single instruction
     system_content = ""
     user_content = ""
@@ -675,12 +699,22 @@ def format_prompt_manually(messages: list, tokenizer) -> str:
             # Skip assistant messages in history for now (can be added if needed)
             pass
     
-    # Format for MedAlpaca/LLaMA-based medical models
-    # Common format: Instruction + Input -> Response
+    # Format for MedSwin/MedAlpaca-based models
+    # MedSwin is finetuned from MedAlpaca-7B, which uses a specific instruction format
+    # Standard MedAlpaca format:
+    # ### Instruction:
+    # {instruction}
+    # ### Input:
+    # {input}
+    # ### Response:
+    
     if system_content:
-        prompt = f"{system_content}\n\nQuestion: {user_content}\n\nAnswer:"
+        # Combine system and user content as instruction
+        instruction = f"{system_content}\n\n{user_content}" if user_content else system_content
+        prompt = f"### Instruction:\n{instruction}\n\n### Response:\n"
     else:
-        prompt = f"Question: {user_content}\n\nAnswer:"
+        # If no system prompt, use user content as instruction
+        prompt = f"### Instruction:\n{user_content}\n\n### Response:\n"
     
     return prompt
 
