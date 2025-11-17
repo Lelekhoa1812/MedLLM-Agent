@@ -281,65 +281,31 @@ async def get_mcp_session():
         stdio_ctx = stdio_client(server_params)
         read, write = await stdio_ctx.__aenter__()
         
-        # Wait for the server process to fully start
+        # Create ClientSession from the streams
+        # The __aenter__() method automatically handles the initialization handshake
+        session = ClientSession(read, write)
+        
+        # Wait longer for the server process to fully start
         # The server needs time to: start Python, import modules, initialize Gemini client, start MCP server
         logger.info("⏳ Waiting for MCP server process to start...")
-        # Increase wait time and add progressive checks
-        for wait_attempt in range(5):
-            await asyncio.sleep(1.0)  # Check every second
-            # Try to peek at the read stream to see if server is responding
-            # (This is a simple check - the actual initialization will happen below)
-            try:
-                # Check if the process is still alive by attempting a small read with timeout
-                # Note: This is a best-effort check
-                pass
-            except:
-                pass
-        logger.info("⏳ MCP server startup wait complete, proceeding with initialization...")
+        await asyncio.sleep(3.0)  # Increased wait for server process startup
         
-        # Create ClientSession from the streams
-        # ClientSession handles initialization automatically when used as context manager
-        # Use the session as a context manager to ensure proper initialization
-        logger.info("🔄 Creating MCP client session...")
         try:
-            from mcp.types import ClientInfo
-            try:
-                client_info = ClientInfo(
-                    name="medllm-agent",
-                    version="1.0.0"
-                )
-                session = ClientSession(read, write, client_info=client_info)
-            except (TypeError, ValueError):
-                # Fallback if ClientInfo parameters are incorrect
-                session = ClientSession(read, write)
-        except (ImportError, AttributeError):
-            # Fallback if ClientInfo is not available
-            session = ClientSession(read, write)
-        
-        # Initialize the session using context manager pattern
-        # This properly handles the initialization handshake
-        logger.info("🔄 Initializing MCP session...")
-        try:
-            # Enter the session context - this triggers initialization
+            # Initialize the session (this sends initialize request and waits for response)
+            logger.info("🔄 Initializing MCP session...")
             await session.__aenter__()
             logger.info("✅ MCP session initialized, verifying tools...")
         except Exception as e:
-            logger.error(f"❌ MCP session initialization failed: {e}")
-            import traceback
-            logger.debug(traceback.format_exc())
-            # Clean up and return None
-            try:
-                await stdio_ctx.__aexit__(None, None, None)
-            except:
-                pass
-            return None
+            logger.warning(f"MCP session initialization had an issue (may be expected): {e}")
+            # Continue anyway - the session might still work
         
-        # Wait for the server to be fully ready after initialization
-        await asyncio.sleep(1.0)  # Wait after initialization
+        # Wait longer for the server to be fully ready after initialization
+        # The server needs time to process the initialization and be ready for requests
+        await asyncio.sleep(2.0)  # Wait after initialization
         
         # Verify the session works by listing tools with retries
         # This confirms the server is ready to handle requests
-        max_init_retries = 15  # Increased retries
+        max_init_retries = 15
         tools_listed = False
         tools = None
         last_error = None
@@ -350,18 +316,6 @@ async def get_mcp_session():
                     logger.info(f"✅ MCP server ready with {len(tools.tools)} tools: {[t.name for t in tools.tools]}")
                     tools_listed = True
                     break
-                elif tools and hasattr(tools, 'tools'):
-                    # Empty tools list - might be a server issue
-                    logger.warning(f"MCP server returned empty tools list (attempt {init_attempt + 1}/{max_init_retries})")
-                    if init_attempt < max_init_retries - 1:
-                        await asyncio.sleep(1.5)  # Slightly longer wait
-                        continue
-                else:
-                    # Invalid response format
-                    logger.warning(f"MCP server returned invalid tools response (attempt {init_attempt + 1}/{max_init_retries})")
-                    if init_attempt < max_init_retries - 1:
-                        await asyncio.sleep(1.5)
-                        continue
             except Exception as e:
                 last_error = e
                 error_str = str(e).lower()
@@ -370,10 +324,8 @@ async def get_mcp_session():
                 # Log the actual error for debugging
                 if init_attempt == 0:
                     logger.debug(f"First list_tools attempt failed: {error_msg}")
-                elif init_attempt < 3:
-                    logger.debug(f"list_tools attempt {init_attempt + 1} failed: {error_msg}")
                 
-                # Handle different error types
+                # Ignore initialization-related errors during the handshake phase
                 if "initialization" in error_str or "before initialization" in error_str or "not initialized" in error_str:
                     if init_attempt < max_init_retries - 1:
                         wait_time = 0.5 * (init_attempt + 1)  # Progressive wait: 0.5s, 1s, 1.5s...
@@ -381,25 +333,18 @@ async def get_mcp_session():
                         await asyncio.sleep(wait_time)
                         continue
                 elif "invalid request" in error_str or "invalid request parameters" in error_str:
-                    # Invalid request might mean the server isn't ready yet or there's a protocol issue
+                    # This might be a timing issue - wait and retry
                     if init_attempt < max_init_retries - 1:
-                        wait_time = 1.0 * (init_attempt + 1)  # Longer wait for invalid request errors
+                        wait_time = 0.8 * (init_attempt + 1)  # Longer wait for invalid request errors
                         logger.debug(f"Invalid request error (attempt {init_attempt + 1}/{max_init_retries}), waiting {wait_time}s...")
                         await asyncio.sleep(wait_time)
                         continue
-                    else:
-                        # Last attempt failed - log detailed error
-                        logger.error(f"❌ Invalid request parameters error persists. This may indicate a protocol mismatch.")
-                        import traceback
-                        logger.debug(traceback.format_exc())
                 elif init_attempt < max_init_retries - 1:
                     wait_time = 0.5 * (init_attempt + 1)
                     logger.debug(f"Tool listing attempt {init_attempt + 1}/{max_init_retries} failed: {error_msg}, waiting {wait_time}s...")
                     await asyncio.sleep(wait_time)
                 else:
                     logger.error(f"❌ Could not list tools after {max_init_retries} attempts. Last error: {error_msg}")
-                    import traceback
-                    logger.debug(traceback.format_exc())
                     # Don't continue - if we can't list tools, the session is not usable
                     try:
                         await session.__aexit__(None, None, None)
@@ -438,15 +383,7 @@ async def get_mcp_session():
         return None
 
 async def call_agent(user_prompt: str, system_prompt: str = None, files: list = None, model: str = None, temperature: float = 0.2) -> str:
-    """
-    Call Gemini MCP generate_content tool via MCP protocol.
-    
-    This function uses the MCP (Model Context Protocol) to call Gemini AI,
-    NOT direct API calls. It connects to the bundled agent.py MCP server
-    which provides the generate_content tool.
-    
-    Used for: translation, summarization, document parsing, transcription, reasoning
-    """
+    """Call Gemini MCP generate_content tool"""
     if not MCP_AVAILABLE:
         logger.warning("MCP not available for Gemini call")
         return ""
@@ -719,14 +656,9 @@ def generate_speech(text: str):
         return None
 
 def format_prompt_manually(messages: list, tokenizer) -> str:
-    """Manually format prompt for models without chat template
+    """Manually format prompt for models without chat template"""
+    prompt_parts = []
     
-    Following the exact example pattern from MedAlpaca documentation:
-    - Simple Question/Answer format
-    - System prompt as instruction context
-    - Clean formatting without extra special tokens
-    - Ensure no double special tokens are added
-    """
     # Combine system and user messages into a single instruction
     system_content = ""
     user_content = ""
@@ -745,16 +677,10 @@ def format_prompt_manually(messages: list, tokenizer) -> str:
     
     # Format for MedAlpaca/LLaMA-based medical models
     # Common format: Instruction + Input -> Response
-    # Following the exact example pattern - keep it simple and clean
-    # The tokenizer will add BOS token automatically, so we don't add it here
     if system_content:
-        # Clean format: system instruction, then question, then answer prompt
         prompt = f"{system_content}\n\nQuestion: {user_content}\n\nAnswer:"
     else:
         prompt = f"Question: {user_content}\n\nAnswer:"
-    
-    # Ensure prompt is clean (no extra whitespace or special characters)
-    prompt = prompt.strip()
     
     return prompt
 
@@ -835,12 +761,7 @@ def translate_text(text: str, target_lang: str = "en", source_lang: str = None) 
     return text
 
 async def search_web_mcp_tool(query: str, max_results: int = 5) -> list:
-    """
-    Search web using MCP web search tool (e.g., DuckDuckGo MCP server).
-    
-    This function uses MCP tools for web search, NOT direct API calls.
-    It looks for MCP tools with names containing "search", "duckduckgo", "ddg", or "web".
-    """
+    """Search web using MCP web search tool (e.g., DuckDuckGo MCP server)"""
     if not MCP_AVAILABLE:
         return []
     
@@ -1052,12 +973,9 @@ async def summarize_web_content_gemini(content_list: list, query: str) -> str:
     combined_content = "\n\n".join([f"Source: {item['title']}\n{item['content']}" for item in content_list[:3]])
     
     user_prompt = f"""Summarize the following web search results related to the query: "{query}"
-
 Extract key medical information, facts, and insights. Be concise and focus on reliable information.
-
 Search Results:
 {combined_content}
-
 Summary:"""
     
     # Use concise system prompt
@@ -1114,9 +1032,7 @@ async def autonomous_reasoning_gemini(query: str) -> dict:
     """Autonomous reasoning using Gemini MCP"""
     logger.info(f"🧠 [MCP] Analyzing query with Gemini MCP: {query[:100]}...")
     reasoning_prompt = f"""Analyze this medical query and provide structured reasoning:
-
 Query: "{query}"
-
 Analyze:
 1. Query Type: (diagnosis, treatment, drug_info, symptom_analysis, research, general_info)
 2. Complexity: (simple, moderate, complex, multi_faceted)
@@ -1124,7 +1040,6 @@ Analyze:
 4. Requires RAG: (yes/no) - Does this need document context?
 5. Requires Web Search: (yes/no) - Does this need current/updated information?
 6. Sub-questions: Break down into key sub-questions if complex
-
 Respond in JSON format:
 {{
     "query_type": "...",
@@ -1326,17 +1241,14 @@ def autonomous_execution_strategy(reasoning: dict, plan: dict, use_rag: bool, us
 async def self_reflection_gemini(answer: str, query: str) -> dict:
     """Self-reflection using Gemini MCP"""
     reflection_prompt = f"""Evaluate this medical answer for quality and completeness:
-
 Query: "{query}"
 Answer: "{answer[:1000]}"
-
 Evaluate:
 1. Completeness: Does it address all aspects of the query?
 2. Accuracy: Is the medical information accurate?
 3. Clarity: Is it clear and well-structured?
 4. Sources: Are sources cited appropriately?
 5. Missing Information: What important information might be missing?
-
 Respond in JSON:
 {{
     "completeness_score": 0-10,
@@ -1624,7 +1536,6 @@ def stream_chat(
     use_rag: bool,
     medical_model: str,
     use_web_search: bool,
-    disable_agentic_reasoning: bool,
     request: gr.Request
 ):
     if not request:
@@ -1635,57 +1546,36 @@ def stream_chat(
     index_dir = f"./{user_id}_index"
     has_rag_index = os.path.exists(index_dir)
     
-    # If agentic reasoning is disabled, use base MedSwin model only
-    if disable_agentic_reasoning:
-        logger.info("🚫 Agentic reasoning disabled - using base MedSwin model only")
-        # Skip all MCP functionality: reasoning, translation, web search, summarization
-        original_message = message
-        original_lang = "en"  # Assume English, no translation
-        needs_translation = False
-        final_use_rag = use_rag and has_rag_index  # Still allow RAG if user wants it
-        final_use_web_search = False  # Disable web search when agentic reasoning is off
-        reasoning_note = ""
-        
-        # Simple reasoning structure for base model
-        reasoning = {
-            "query_type": "general_info",
-            "complexity": "simple",
-            "information_needs": ["direct_answer"],
-            "requires_rag": final_use_rag,
-            "requires_web_search": False,
-            "sub_questions": [message]
-        }
-    else:
-        # ===== AUTONOMOUS REASONING =====
-        logger.info("🤔 Starting autonomous reasoning...")
-        reasoning = autonomous_reasoning(message, history)
-        
-        # ===== PLANNING =====
-        logger.info("📋 Creating execution plan...")
-        plan = create_execution_plan(reasoning, message, has_rag_index)
-        
-        # ===== AUTONOMOUS EXECUTION STRATEGY =====
-        logger.info("🎯 Determining execution strategy...")
-        execution_strategy = autonomous_execution_strategy(reasoning, plan, use_rag, use_web_search, has_rag_index)
-        
-        # Use autonomous strategy decisions (respect user's RAG setting)
-        final_use_rag = execution_strategy["use_rag"] and has_rag_index  # Only use RAG if enabled AND documents exist
-        final_use_web_search = execution_strategy["use_web_search"]
-        
-        # Show reasoning override message if applicable
-        reasoning_note = ""
-        if execution_strategy["reasoning_override"]:
-            reasoning_note = f"\n\n💡 *Autonomous Reasoning: {execution_strategy['rationale']}*"
-        
-        # Detect language and translate if needed (Step 1 of plan)
-        original_lang = detect_language(message)
-        original_message = message
-        needs_translation = original_lang != "en"
-        
-        if needs_translation:
-            logger.info(f"Detected non-English language: {original_lang}, translating to English...")
-            message = translate_text(message, target_lang="en", source_lang=original_lang)
-            logger.info(f"Translated query: {message}")
+    # ===== AUTONOMOUS REASONING =====
+    logger.info("🤔 Starting autonomous reasoning...")
+    reasoning = autonomous_reasoning(message, history)
+    
+    # ===== PLANNING =====
+    logger.info("📋 Creating execution plan...")
+    plan = create_execution_plan(reasoning, message, has_rag_index)
+    
+    # ===== AUTONOMOUS EXECUTION STRATEGY =====
+    logger.info("🎯 Determining execution strategy...")
+    execution_strategy = autonomous_execution_strategy(reasoning, plan, use_rag, use_web_search, has_rag_index)
+    
+    # Use autonomous strategy decisions (respect user's RAG setting)
+    final_use_rag = execution_strategy["use_rag"] and has_rag_index  # Only use RAG if enabled AND documents exist
+    final_use_web_search = execution_strategy["use_web_search"]
+    
+    # Show reasoning override message if applicable
+    reasoning_note = ""
+    if execution_strategy["reasoning_override"]:
+        reasoning_note = f"\n\n💡 *Autonomous Reasoning: {execution_strategy['rationale']}*"
+    
+    # Detect language and translate if needed (Step 1 of plan)
+    original_lang = detect_language(message)
+    original_message = message
+    needs_translation = original_lang != "en"
+    
+    if needs_translation:
+        logger.info(f"Detected non-English language: {original_lang}, translating to English...")
+        message = translate_text(message, target_lang="en", source_lang=original_lang)
+        logger.info(f"Translated query: {message}")
     
     # Initialize medical model
     medical_model_obj, medical_tokenizer = initialize_medical_model(medical_model)
@@ -1696,8 +1586,8 @@ def stream_chat(
     else:
         base_system_prompt = "As a medical specialist, provide short and concise clinical answers. Be brief and avoid lengthy explanations. Focus on key medical facts only."
     
-    # Add reasoning context to system prompt for complex queries (only when agentic reasoning is enabled)
-    if not disable_agentic_reasoning and reasoning["complexity"] in ["complex", "multi_faceted"]:
+    # Add reasoning context to system prompt for complex queries
+    if reasoning["complexity"] in ["complex", "multi_faceted"]:
         base_system_prompt += f"\n\nQuery Analysis: This is a {reasoning['complexity']} {reasoning['query_type']} query. Address all sub-questions: {', '.join(reasoning.get('sub_questions', [])[:3])}"
     
     # ===== EXECUTION: RAG Retrieval (Step 2) =====
@@ -1737,12 +1627,10 @@ def stream_chat(
     web_sources = []
     web_urls = []  # Store URLs for citations
     if final_use_web_search:
-        logger.info("🌐 Performing web search (using MCP tools, with Gemini MCP for summarization)...")
-        # search_web() tries MCP web search tool first, then falls back to direct API
+        logger.info("🌐 Performing web search (will use Gemini MCP for summarization)...")
         web_results = search_web(message, max_results=5)
         if web_results:
             logger.info(f"📊 Found {len(web_results)} web search results, now summarizing with Gemini MCP...")
-            # summarize_web_content() uses Gemini MCP via call_agent()
             web_summary = summarize_web_content(web_results, message)
             if web_summary and len(web_summary) > 50:  # Check if we got a real summary
                 logger.info(f"✅ [MCP] Gemini MCP summarization successful ({len(web_summary)} chars)")
@@ -1788,9 +1676,7 @@ def stream_chat(
     max_new_tokens = int(max_new_tokens) if isinstance(max_new_tokens, (int, float)) else 2048
     max_new_tokens = max(max_new_tokens, 1024)  # Minimum 1024 tokens for medical answers
     
-    # Format prompt - MedAlpaca/MedSwin models typically don't have chat templates
-    # Use manual formatting for consistent behavior
-    # Following the example: check if tokenizer has chat template, otherwise format manually
+    # Check if tokenizer has chat template, otherwise format manually
     if hasattr(medical_tokenizer, 'chat_template') and medical_tokenizer.chat_template is not None:
         try:
             prompt = medical_tokenizer.apply_chat_template(
@@ -1806,18 +1692,8 @@ def stream_chat(
         # Manual formatting for models without chat template
         prompt = format_prompt_manually(messages, medical_tokenizer)
     
-    # Calculate prompt length for stopping criteria
-    # Tokenize to get length - use EXACT same tokenization as model.py
-    # This ensures consistency and prevents tokenization mismatches
-    inputs = medical_tokenizer(
-        prompt,
-        return_tensors="pt",
-        add_special_tokens=True,  # Match model.py tokenization
-        padding=False,
-        truncation=False
-    )
+    inputs = medical_tokenizer(prompt, return_tensors="pt").to(medical_model_obj.device)
     prompt_length = inputs['input_ids'].shape[1]
-    logger.debug(f"Prompt length: {prompt_length} tokens")
     
     stop_event = threading.Event()
     
@@ -1830,23 +1706,19 @@ def stream_chat(
             return self.stop_event.is_set()
     
     # Custom stopping criteria that doesn't stop on EOS too early
-    # This prevents premature stopping which can cause corrupted outputs
-    # Following the example: use min_new_tokens=100 to ensure proper generation
     class MedicalStoppingCriteria(StoppingCriteria):
         def __init__(self, eos_token_id, prompt_length, min_new_tokens=100):
             super().__init__()
             self.eos_token_id = eos_token_id
             self.prompt_length = prompt_length
             self.min_new_tokens = min_new_tokens
-            
+
         def __call__(self, input_ids, scores, **kwargs):
             current_length = input_ids.shape[1]
             new_tokens = current_length - self.prompt_length
             last_token = input_ids[0, -1].item()
             
             # Don't stop on EOS if we haven't generated enough new tokens
-            # This prevents early stopping that can cause corrupted outputs
-            # Following example: require at least min_new_tokens before allowing EOS
             if new_tokens < self.min_new_tokens:
                 return False
             # Allow EOS after minimum new tokens have been generated
@@ -1857,13 +1729,10 @@ def stream_chat(
         MedicalStoppingCriteria(eos_token_id, prompt_length, min_new_tokens=100)
     ])
     
-    # Create streamer with correct settings for LLaMA-based models
-    # skip_special_tokens=True ensures clean text output without special token artifacts
     streamer = TextIteratorStreamer(
         medical_tokenizer,
         skip_prompt=True,
-        skip_special_tokens=True,  # Skip special tokens in output for clean text
-        timeout=None  # Don't timeout on long generations
+        skip_special_tokens=True
     )
     
     temperature = float(temperature) if isinstance(temperature, (int, float)) else 0.7
@@ -1906,8 +1775,7 @@ def stream_chat(
             yield updated_history
         
         # ===== SELF-REFLECTION (Step 6) =====
-        # Skip self-reflection when agentic reasoning is disabled
-        if not disable_agentic_reasoning and reasoning["complexity"] in ["complex", "multi_faceted"]:
+        if reasoning["complexity"] in ["complex", "multi_faceted"]:
             logger.info("🔍 Performing self-reflection on answer quality...")
             reflection = self_reflection(partial_response, message, reasoning)
             
@@ -1924,8 +1792,8 @@ def stream_chat(
             partial_response = reasoning_note + "\n\n" + partial_response
             updated_history[-1]["content"] = partial_response
         
-        # Translate back if needed (only when agentic reasoning is enabled)
-        if not disable_agentic_reasoning and needs_translation and partial_response:
+        # Translate back if needed
+        if needs_translation and partial_response:
             logger.info(f"Translating response back to {original_lang}...")
             translated_response = translate_text(partial_response, target_lang=original_lang, source_lang="en")
             partial_response = translated_response
@@ -2099,12 +1967,6 @@ def create_demo():
                 
                 with gr.Accordion("⚙️ Advanced Settings", open=False):
                     with gr.Row():
-                        disable_agentic_reasoning = gr.Checkbox(
-                            value=False,
-                            label="Disable Agentic Reasoning",
-                            info="Use base MedSwin model only, no MCP tools (Gemini, web search, reasoning)"
-                        )
-                    with gr.Row():
                         use_rag = gr.Checkbox(
                             value=False,
                             label="Enable Document RAG",
@@ -2198,8 +2060,7 @@ def create_demo():
                         merge_threshold,
                         use_rag,
                         medical_model,
-                        use_web_search,
-                        disable_agentic_reasoning
+                        use_web_search
                     ],
                     outputs=chatbot
                 )
@@ -2219,8 +2080,7 @@ def create_demo():
                         merge_threshold,
                         use_rag,
                         medical_model,
-                        use_web_search,
-                        disable_agentic_reasoning
+                        use_web_search
                     ],
                     outputs=chatbot
                 )

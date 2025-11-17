@@ -17,13 +17,11 @@ from pathlib import Path
 # MCP imports
 try:
     from mcp.server import Server
-    from mcp.types import Tool, TextContent, ImageContent, EmbeddedResource, InitializationOptions, ServerCapabilities
-    MCP_AVAILABLE = True
-except ImportError as e:
-    print(f"Error: MCP SDK not installed. Install with: pip install mcp", file=sys.stderr)
-    print(f"Import error details: {e}", file=sys.stderr)
-    MCP_AVAILABLE = False
-    # Don't exit immediately - let the main function handle it gracefully
+    from mcp.types import Tool, TextContent, ImageContent, EmbeddedResource
+    from mcp.server.models import InitializationOptions
+except ImportError:
+    print("Error: MCP SDK not installed. Install with: pip install mcp", file=sys.stderr)
+    sys.exit(1)
 
 # Gemini imports
 try:
@@ -273,23 +271,13 @@ async def call_tool(name: str, arguments: dict) -> Sequence[TextContent | ImageC
 
 async def main():
     """Main entry point"""
-    if not MCP_AVAILABLE:
-        logger.error("MCP SDK not available. Cannot start MCP server.")
-        print("Error: MCP SDK not installed. Install with: pip install mcp", file=sys.stderr)
-        sys.exit(1)
-    
     logger.info("Starting Gemini MCP Server...")
     logger.info(f"Gemini API Key: {'Set' if GEMINI_API_KEY else 'Not Set'}")
     logger.info(f"Default Model: {GEMINI_MODEL}")
     logger.info(f"Default Lite Model: {GEMINI_MODEL_LITE}")
     
     # Use stdio_server from mcp.server.stdio
-    try:
-        from mcp.server.stdio import stdio_server
-    except ImportError as e:
-        logger.error(f"Failed to import stdio_server: {e}")
-        print(f"Error: Failed to import MCP stdio_server: {e}", file=sys.stderr)
-        sys.exit(1)
+    from mcp.server.stdio import stdio_server
     
     # Suppress root logger warnings during initialization
     # These are expected during the MCP initialization handshake
@@ -302,41 +290,53 @@ async def main():
             logging.getLogger("root").setLevel(original_root_level)
             logger.info("✅ MCP server stdio streams ready, starting server...")
             
-            # Create initialization options for the server
-            # The server capabilities are automatically determined from registered handlers
-            # Try to use Server's built-in method to get capabilities, or create minimal options
+            # Create initialization options
+            # The Server class will automatically provide its capabilities based on
+            # the registered @app.list_tools() and @app.call_tool() handlers
             try:
-                # Try to get capabilities from the server if it has a method
+                # Try to get capabilities from the server if the method exists
                 if hasattr(app, 'get_capabilities'):
-                    capabilities = app.get_capabilities()
+                    try:
+                        # Try with NotificationOptions if available
+                        from mcp.server.lowlevel.server import NotificationOptions
+                        server_capabilities = app.get_capabilities(
+                            notification_options=NotificationOptions(),
+                            experimental_capabilities={}
+                        )
+                    except (ImportError, AttributeError, TypeError):
+                        # Fallback: try without NotificationOptions
+                        try:
+                            server_capabilities = app.get_capabilities()
+                        except:
+                            # If get_capabilities doesn't work, create minimal capabilities
+                            server_capabilities = {}
                 else:
-                    # Create minimal capabilities - tools are registered via @app.list_tools() decorator
-                    capabilities = ServerCapabilities(tools={})
-            except:
-                # Fallback: create minimal capabilities
-                capabilities = ServerCapabilities(tools={})
+                    # Server will provide capabilities automatically, use empty dict
+                    server_capabilities = {}
+            except Exception as e:
+                logger.debug(f"Could not get server capabilities: {e}, server will provide defaults")
+                # Server will handle capabilities automatically
+                server_capabilities = {}
             
-            initialization_options = InitializationOptions(
+            # Create initialization options
+            # The server_name and server_version are required
+            # Capabilities will be automatically determined by the Server from registered handlers
+            init_options = InitializationOptions(
                 server_name="gemini-mcp-server",
                 server_version="1.0.0",
-                capabilities=capabilities
+                capabilities=server_capabilities
             )
             
-            # Run the server - the Server class automatically handles initialization
-            # The server will provide its capabilities based on registered handlers
-            # (@app.list_tools() and @app.call_tool())
+            # Run the server with initialization options
             await app.run(
                 read_stream=streams[0],
                 write_stream=streams[1],
-                initialization_options=initialization_options
+                initialization_options=init_options
             )
     except Exception as e:
         logging.getLogger("root").setLevel(original_root_level)
         logger.error(f"❌ MCP server error: {e}")
-        import traceback
-        logger.debug(traceback.format_exc())
         raise
 
 if __name__ == "__main__":
     asyncio.run(main())
-
