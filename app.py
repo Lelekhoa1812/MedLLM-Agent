@@ -2019,7 +2019,8 @@ def stream_chat(
     
     # ===== STEP 5: Combine all MedSwin answers into final answer =====
     final_answer = "\n\n".join(medswin_answers) if medswin_answers else "I apologize, but I was unable to generate a response."
-    
+    citations_text = ""
+
     # Clean final answer - ensure no tables, only Markdown bullets
     if "|" in final_answer and "---" in final_answer:
         logger.warning("[MEDSWIN] Final answer contains tables, converting to bullets")
@@ -2042,7 +2043,6 @@ def stream_chat(
         final_answer = translate_text(final_answer, target_lang=original_lang, source_lang="en")
         
         # Add citations if web sources were used
-        citations_text = ""
         if web_urls:
             unique_urls = list(dict.fromkeys(web_urls))  # Preserve order, remove duplicates
             citation_links = []
