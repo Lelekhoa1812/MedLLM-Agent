@@ -726,10 +726,10 @@ def format_prompt_manually(messages: list, tokenizer) -> str:
     {instruction}
     ### Input:
     {input}  (optional, can be empty)
-    ### Response:
-    {response}
+    ### Output:
+    {output}
     
-    For MedAlpaca, the user query is the instruction, and system prompt (if any) 
+    For MedAlpaca/MedSwin, the user query is the instruction, and system prompt (if any) 
     is prepended to the instruction.
     """
     # Extract system and user messages
@@ -746,22 +746,22 @@ def format_prompt_manually(messages: list, tokenizer) -> str:
             user_content = content
         # Skip assistant messages in history
     
-    # Format for MedAlpaca: user query is instruction, system prompt is prepended
+    # Format for MedAlpaca/MedSwin: user query is instruction, system prompt is prepended
     if system_content and user_content:
         # Combine system and user: system context + user query as instruction
         instruction = f"{system_content.strip()}\n\n{user_content.strip()}"
-        prompt = f"### Instruction:\n{instruction}\n\n### Input:\n\n### Response:\n"
+        prompt = f"### Instruction:\n{instruction}\n\n### Input:\n\n### Output:\n"
     elif user_content:
         # Only user content: use as instruction
         instruction = user_content.strip()
-        prompt = f"### Instruction:\n{instruction}\n\n### Input:\n\n### Response:\n"
+        prompt = f"### Instruction:\n{instruction}\n\n### Input:\n\n### Output:\n"
     elif system_content:
         # Only system content: use as instruction (shouldn't happen normally)
         instruction = system_content.strip()
-        prompt = f"### Instruction:\n{instruction}\n\n### Input:\n\n### Response:\n"
+        prompt = f"### Instruction:\n{instruction}\n\n### Input:\n\n### Output:\n"
     else:
         # Fallback: empty prompt
-        prompt = "### Instruction:\n\n### Input:\n\n### Response:\n"
+        prompt = "### Instruction:\n\n### Input:\n\n### Output:\n"
     
     return prompt
 

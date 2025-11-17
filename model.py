@@ -38,14 +38,20 @@ global_medical_tokenizers = {}
 
 
 def initialize_medical_model(model_name: str):
-    """Initialize medical model (MedSwin) - simplified configuration for MedAlpaca-based models"""
+    """Initialize medical model (MedSwin) - simplified configuration for MedAlpaca-based models
+    
+    Simplified initialization following MedAlpaca best practices:
+    - Use default tokenizer configuration from model
+    - Minimal configuration changes
+    - Ensure proper pad_token setup for LLaMA-based models
+    """
     global global_medical_models, global_medical_tokenizers
     if model_name not in global_medical_models or global_medical_models[model_name] is None:
         logger.info(f"Initializing medical model: {model_name}...")
         model_path = MEDSWIN_MODELS[model_name]
         
-        # Load tokenizer - let it use its default configuration from the model
-        # MedAlpaca models come with proper tokenizer config, we don't need to override it
+        # Load tokenizer - use default configuration from the model
+        # MedAlpaca/MedSwin models come with proper tokenizer config
         tokenizer = AutoTokenizer.from_pretrained(
             model_path, 
             token=HF_TOKEN,
@@ -57,7 +63,8 @@ def initialize_medical_model(model_name: str):
             tokenizer.pad_token = tokenizer.eos_token
             tokenizer.pad_token_id = tokenizer.eos_token_id
         
-        # Load model - use default configuration from the model
+        # Load model - simplified configuration
+        # Use default settings from the model, minimal overrides
         model = AutoModelForCausalLM.from_pretrained(
             model_path,
             device_map="auto",
@@ -66,6 +73,9 @@ def initialize_medical_model(model_name: str):
             torch_dtype=torch.float16
         )
         
+        # Ensure model is in eval mode (important for inference)
+        model.eval()
+        
         # Ensure model config matches tokenizer (only pad_token_id needs to be synced)
         if hasattr(model.config, 'pad_token_id') and tokenizer.pad_token_id is not None:
             model.config.pad_token_id = tokenizer.pad_token_id
@@ -73,7 +83,9 @@ def initialize_medical_model(model_name: str):
         global_medical_models[model_name] = model
         global_medical_tokenizers[model_name] = tokenizer
         logger.info(f"Medical model {model_name} initialized successfully")
+        logger.info(f"Model device: {next(model.parameters()).device}")
         logger.info(f"Tokenizer: pad_token={tokenizer.pad_token}, eos_token={tokenizer.eos_token}, bos_token={tokenizer.bos_token}")
+        logger.info(f"Model vocab size: {len(tokenizer)}")
     return global_medical_models[model_name], global_medical_tokenizers[model_name]
 
 
@@ -123,36 +135,55 @@ def generate_with_medswin(
     
     This function performs tokenization and model inference.
     The model is already on GPU (initialized with device_map="auto").
+    
+    Simplified approach following MedAlpaca best practices:
+    - Ensure model is in eval mode
+    - Use proper tokenization (no padding for single sequence)
+    - Use standard generation parameters
     """
-    # Tokenize prompt - this is where tokenization should happen (only once)
+    # Ensure model is in evaluation mode
+    medical_model_obj.eval()
+    
+    # Tokenize prompt - simple and clean tokenization
+    # MedAlpaca models expect clean tokenization without special handling
     inputs = medical_tokenizer(
         prompt, 
         return_tensors="pt",
         padding=False,  # No padding for single sequence
-        truncation=False  # Don't truncate, let model handle it
-    ).to(medical_model_obj.device)
+        truncation=True,  # Truncate if too long (respect model max length)
+        max_length=2048  # Reasonable max length for prompt
+    )
     
-    # Get actual prompt length for stopping criteria
-    prompt_length = inputs['input_ids'].shape[1]
+    # Move inputs to the same device as the model
+    device = next(medical_model_obj.parameters()).device
+    inputs = {k: v.to(device) for k, v in inputs.items()}
     
-    # Update stopping criteria with actual prompt length if needed
-    # (The stopping criteria is already set in app.py, but we can verify it here)
-    
-    # Prepare generation kwargs - simplified for MedAlpaca models
+    # Prepare generation kwargs - simplified and standard for MedAlpaca models
     generation_kwargs = {
-        **inputs,
-        "streamer": streamer,
+        "input_ids": inputs["input_ids"],
+        "attention_mask": inputs.get("attention_mask", None),
         "max_new_tokens": max_new_tokens,
         "temperature": temperature,
         "top_p": top_p,
         "top_k": top_k,
         "repetition_penalty": penalty,
         "do_sample": True,
-        "stopping_criteria": stopping_criteria,
         "eos_token_id": eos_token_id,
-        "pad_token_id": pad_token_id
+        "pad_token_id": pad_token_id,
+        "streamer": streamer,
+        "stopping_criteria": stopping_criteria
     }
     
-    # Run generation on GPU
-    medical_model_obj.generate(**generation_kwargs)
+    # Remove None values to avoid issues
+    generation_kwargs = {k: v for k, v in generation_kwargs.items() if v is not None}
+    
+    # Run generation on GPU with torch.no_grad() for efficiency
+    with torch.no_grad():
+        try:
+            medical_model_obj.generate(**generation_kwargs)
+        except Exception as e:
+            logger.error(f"Error during generation: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
+            raise
 
