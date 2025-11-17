@@ -63,6 +63,12 @@ def initialize_medical_model(model_name: str):
             tokenizer.pad_token = tokenizer.eos_token
             tokenizer.pad_token_id = tokenizer.eos_token_id
         
+        # CRITICAL: Set padding_side to "left" for LLaMA-based models
+        # This ensures proper attention alignment and prevents corrupted output
+        # LLaMA models are autoregressive and generate left-to-right, so padding must be on the left
+        tokenizer.padding_side = "left"
+        logger.info(f"Tokenizer padding_side set to: {tokenizer.padding_side}")
+        
         # Load model - use device_map="auto" for ZeroGPU Spaces
         model = AutoModelForCausalLM.from_pretrained(
             model_path,
@@ -77,8 +83,13 @@ def initialize_medical_model(model_name: str):
         model.eval()
         
         # Sync pad_token_id between model config and tokenizer
+        # This is critical for proper generation
         if hasattr(model.config, 'pad_token_id'):
             model.config.pad_token_id = tokenizer.pad_token_id
+        if hasattr(model.config, 'bos_token_id') and tokenizer.bos_token_id is not None:
+            model.config.bos_token_id = tokenizer.bos_token_id
+        if hasattr(model.config, 'eos_token_id') and tokenizer.eos_token_id is not None:
+            model.config.eos_token_id = tokenizer.eos_token_id
         
         global_medical_models[model_name] = model
         global_medical_tokenizers[model_name] = tokenizer
@@ -134,10 +145,11 @@ def generate_with_medswin(
     """
     Generate text with MedSwin model - following standard LLaMA/MedAlpaca inference pattern
     
-    Key fixes:
-    - Proper device detection for device_map="auto" models
-    - Correct tokenization with proper device placement
-    - Standard generation kwargs structure
+    Key fixes for corrupted output:
+    - Proper tokenization without double tokenization
+    - Correct device placement for ZeroGPU
+    - Standard generation kwargs for LLaMA-based models
+    - Proper handling of special tokens
     """
     # Ensure model is in evaluation mode
     medical_model_obj.eval()
@@ -146,21 +158,24 @@ def generate_with_medswin(
     # For device_map="auto", get device from first parameter
     device = next(medical_model_obj.parameters()).device
     
-    # Tokenize prompt - use add_special_tokens=True (default) for proper formatting
+    # Tokenize prompt - LLaMA tokenizers automatically add BOS token when add_special_tokens=True
+    # This is the standard way to tokenize for LLaMA-based models
     inputs = medical_tokenizer(
         prompt, 
         return_tensors="pt",
-        add_special_tokens=True
+        add_special_tokens=True  # Default for LLaMA - adds BOS token automatically
     )
     
     # Move inputs to the correct device
     inputs = {k: v.to(device) for k, v in inputs.items()}
     
     # Log tokenization info for debugging
-    logger.debug(f"Tokenized prompt: {inputs['input_ids'].shape[1]} tokens on device {device}")
+    prompt_length = inputs['input_ids'].shape[1]
+    logger.info(f"Tokenized prompt: {prompt_length} tokens on device {device}")
+    logger.debug(f"First few token IDs: {inputs['input_ids'][0][:10].tolist()}")
+    logger.debug(f"Last few token IDs: {inputs['input_ids'][0][-10:].tolist()}")
     
-    # Prepare generation kwargs - use standard structure
-    # Only include input_ids and attention_mask (standard for LLaMA models)
+    # Prepare generation kwargs - following standard LLaMA/MedAlpaca pattern
     generation_kwargs = {
         "input_ids": inputs["input_ids"],
         "max_new_tokens": max_new_tokens,
@@ -175,14 +190,14 @@ def generate_with_medswin(
         "pad_token_id": pad_token_id
     }
     
-    # Add attention_mask if it exists
+    # Add attention_mask if it exists (important for proper generation)
     if "attention_mask" in inputs:
         generation_kwargs["attention_mask"] = inputs["attention_mask"]
     
     # Run generation on GPU with torch.no_grad() for efficiency
     with torch.no_grad():
         try:
-            logger.debug(f"Starting generation with max_new_tokens={max_new_tokens}, temperature={temperature}")
+            logger.debug(f"Starting generation with max_new_tokens={max_new_tokens}, temperature={temperature}, top_p={top_p}, top_k={top_k}")
             medical_model_obj.generate(**generation_kwargs)
         except Exception as e:
             logger.error(f"Error during generation: {e}")

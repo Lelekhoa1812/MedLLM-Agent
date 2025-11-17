@@ -722,10 +722,11 @@ def format_prompt_manually(messages: list, tokenizer) -> str:
     """Manually format prompt for MedSwin/MedAlpaca-based models
     
     MedSwin is finetuned from MedAlpaca-7B, which uses a simple instruction format.
-    Following standard MedAlpaca format:
+    Following standard MedAlpaca format from the example:
     - Simple Question/Answer format
     - System prompt as instruction context
-    - Clean formatting without extra tokens
+    - Clean formatting without extra special tokens
+    - No BOS/EOS tokens added manually (tokenizer handles this)
     """
     # Combine system and user messages into a single instruction
     system_content = ""
@@ -744,7 +745,8 @@ def format_prompt_manually(messages: list, tokenizer) -> str:
             pass
     
     # Format for MedAlpaca/LLaMA-based medical models
-    # Standard format: Instruction + Question -> Answer
+    # Following the example format: Instruction + Question -> Answer
+    # This is the standard format that MedAlpaca models expect
     if system_content:
         # Include system prompt as instruction context
         prompt = f"{system_content}\n\nQuestion: {user_content}\n\nAnswer:"
@@ -1786,6 +1788,7 @@ def stream_chat(
     
     # Format prompt - MedAlpaca/MedSwin models typically don't have chat templates
     # Use manual formatting for consistent behavior
+    # CRITICAL: MedAlpaca/MedSwin models need simple, clean prompt formatting
     if hasattr(medical_tokenizer, 'chat_template') and medical_tokenizer.chat_template is not None:
         try:
             prompt = medical_tokenizer.apply_chat_template(
@@ -1802,7 +1805,8 @@ def stream_chat(
         prompt = format_prompt_manually(messages, medical_tokenizer)
     
     # Calculate prompt length for stopping criteria
-    # Tokenize once to get length (without device placement - that happens in model.py)
+    # Tokenize once to get length (matching the tokenization in model.py)
+    # Use add_special_tokens=True to match model.py tokenization (default for LLaMA)
     inputs = medical_tokenizer(prompt, return_tensors="pt", add_special_tokens=True)
     prompt_length = inputs['input_ids'].shape[1]
     logger.debug(f"Prompt length: {prompt_length} tokens")
@@ -1819,8 +1823,9 @@ def stream_chat(
     
     # Custom stopping criteria that doesn't stop on EOS too early
     # This prevents premature stopping which can cause corrupted outputs
+    # Following the example: use min_new_tokens=100 to ensure proper generation
     class MedicalStoppingCriteria(StoppingCriteria):
-        def __init__(self, eos_token_id, prompt_length, min_new_tokens=50):
+        def __init__(self, eos_token_id, prompt_length, min_new_tokens=100):
             super().__init__()
             self.eos_token_id = eos_token_id
             self.prompt_length = prompt_length
@@ -1833,6 +1838,7 @@ def stream_chat(
             
             # Don't stop on EOS if we haven't generated enough new tokens
             # This prevents early stopping that can cause corrupted outputs
+            # Following example: require at least min_new_tokens before allowing EOS
             if new_tokens < self.min_new_tokens:
                 return False
             # Allow EOS after minimum new tokens have been generated
@@ -1840,7 +1846,7 @@ def stream_chat(
     
     stopping_criteria = StoppingCriteriaList([
         StopOnEvent(stop_event),
-        MedicalStoppingCriteria(eos_token_id, prompt_length, min_new_tokens=50)
+        MedicalStoppingCriteria(eos_token_id, prompt_length, min_new_tokens=100)
     ])
     
     streamer = TextIteratorStreamer(
