@@ -38,111 +38,26 @@ global_medical_tokenizers = {}
 
 
 def initialize_medical_model(model_name: str):
-    """Initialize medical model (MedSwin) - download on demand"""
+    """Initialize medical model (MedSwin) - simplified configuration for MedAlpaca-based models"""
     global global_medical_models, global_medical_tokenizers
     if model_name not in global_medical_models or global_medical_models[model_name] is None:
         logger.info(f"Initializing medical model: {model_name}...")
         model_path = MEDSWIN_MODELS[model_name]
-        # Load tokenizer with proper configuration for MedAlpaca-7B/LLaMA-based models
-        # MedAlpaca-7B is finetuned from LLaMA-7B, which uses specific tokenizer settings
+        
+        # Load tokenizer - let it use its default configuration from the model
+        # MedAlpaca models come with proper tokenizer config, we don't need to override it
         tokenizer = AutoTokenizer.from_pretrained(
             model_path, 
             token=HF_TOKEN,
-            use_fast=False,  # Use slow tokenizer for better compatibility with LLaMA
-            padding_side="left"  # Left padding for causal LM
+            padding_side="left"  # Left padding for causal LM generation
         )
         
-        # Fix tokenizer configuration for MedSwin/MedAlpaca-based models
-        # MedAlpaca-7B is based on LLaMA, which uses specific special tokens
-        # LLaMA models use:
-        # - bos_token: <s> (token ID 1)
-        # - eos_token: </s> (token ID 2)
-        # - unk_token: <unk> (token ID 0)
-        # - pad_token: typically not set, but we use eos_token
-        
-        # Ensure eos_token is properly set (LLaMA uses </s> with ID 2)
-        # MedAlpaca-7B is finetuned from LLaMA-7B, which uses </s> as EOS token
-        if tokenizer.eos_token is None:
-            # First try to get eos_token_id from tokenizer config
-            if hasattr(tokenizer, 'eos_token_id') and tokenizer.eos_token_id is not None:
-                eos_id = tokenizer.eos_token_id
-                # Try to decode the token ID to get the string representation
-                if eos_id < len(tokenizer):
-                    try:
-                        decoded = tokenizer.decode([eos_id])
-                        # Clean up decoded token (remove special characters)
-                        if decoded and decoded.strip():
-                            tokenizer.eos_token = decoded.strip()
-                        else:
-                            tokenizer.eos_token = "</s>"
-                    except:
-                        tokenizer.eos_token = "</s>"
-                else:
-                    tokenizer.eos_token = "</s>"
-                    tokenizer.eos_token_id = 2  # Standard LLaMA EOS token ID
-            else:
-                # Set EOS token to </s> (standard for LLaMA/MedAlpaca)
-                tokenizer.eos_token = "</s>"
-                try:
-                    # Try to get the token ID for </s>
-                    if "</s>" in tokenizer.get_vocab():
-                        tokenizer.eos_token_id = tokenizer.get_vocab()["</s>"]
-                    else:
-                        # Fallback to standard LLaMA EOS token ID
-                        tokenizer.eos_token_id = 2
-                except:
-                    # Standard LLaMA EOS token ID is 2
-                    tokenizer.eos_token_id = 2
-        
-        # Ensure bos_token is set (LLaMA uses <s> with ID 1)
-        # MedAlpaca-7B is finetuned from LLaMA-7B, which uses <s> as BOS token
-        if tokenizer.bos_token is None:
-            if hasattr(tokenizer, 'bos_token_id') and tokenizer.bos_token_id is not None:
-                bos_id = tokenizer.bos_token_id
-                # Try to decode the token ID to get the string representation
-                if bos_id < len(tokenizer):
-                    try:
-                        decoded = tokenizer.decode([bos_id])
-                        # Clean up decoded token (remove special characters)
-                        if decoded and decoded.strip():
-                            tokenizer.bos_token = decoded.strip()
-                        else:
-                            tokenizer.bos_token = "<s>"
-                    except:
-                        tokenizer.bos_token = "<s>"
-                else:
-                    tokenizer.bos_token = "<s>"
-                    tokenizer.bos_token_id = 1  # Standard LLaMA BOS token ID
-            else:
-                tokenizer.bos_token = "<s>"
-                try:
-                    # Try to get the token ID for <s>
-                    if "<s>" in tokenizer.get_vocab():
-                        tokenizer.bos_token_id = tokenizer.get_vocab()["<s>"]
-                    else:
-                        # Fallback to standard LLaMA BOS token ID
-                        tokenizer.bos_token_id = 1
-                except:
-                    tokenizer.bos_token_id = 1  # Standard LLaMA BOS token ID
-        
-        # Set pad_token - MedAlpaca/LLaMA models typically use EOS as PAD
-        # This is important for batch processing
+        # Only set pad_token if it's missing (use eos_token as pad_token for LLaMA-based models)
         if tokenizer.pad_token is None:
-            # Use eos_token as pad_token (standard practice for LLaMA-based models)
-            if tokenizer.eos_token is not None and tokenizer.eos_token_id is not None:
-                tokenizer.pad_token = tokenizer.eos_token
-                tokenizer.pad_token_id = tokenizer.eos_token_id
-            else:
-                # Fallback: add a pad token (shouldn't happen if eos_token is set correctly)
-                logger.warning("EOS token not set, adding [PAD] token as fallback")
-                tokenizer.add_special_tokens({'pad_token': '[PAD]'})
-                tokenizer.pad_token_id = tokenizer.convert_tokens_to_ids('[PAD]')
+            tokenizer.pad_token = tokenizer.eos_token
+            tokenizer.pad_token_id = tokenizer.eos_token_id
         
-        # Ensure tokenizer has proper attributes for LLaMA models
-        if not hasattr(tokenizer, 'model_max_length') or tokenizer.model_max_length is None:
-            # LLaMA models typically have 2048 or 4096 max length
-            tokenizer.model_max_length = 2048
-        
+        # Load model - use default configuration from the model
         model = AutoModelForCausalLM.from_pretrained(
             model_path,
             device_map="auto",
@@ -151,35 +66,14 @@ def initialize_medical_model(model_name: str):
             torch_dtype=torch.float16
         )
         
-        # Update model config to match tokenizer settings
-        # This ensures consistency between tokenizer and model
-        if hasattr(model.config, 'pad_token_id'):
-            if model.config.pad_token_id != tokenizer.pad_token_id:
-                model.config.pad_token_id = tokenizer.pad_token_id
-        else:
+        # Ensure model config matches tokenizer (only pad_token_id needs to be synced)
+        if hasattr(model.config, 'pad_token_id') and tokenizer.pad_token_id is not None:
             model.config.pad_token_id = tokenizer.pad_token_id
-        
-        if hasattr(model.config, 'eos_token_id'):
-            if model.config.eos_token_id != tokenizer.eos_token_id:
-                model.config.eos_token_id = tokenizer.eos_token_id
-        else:
-            model.config.eos_token_id = tokenizer.eos_token_id
-        
-        if hasattr(model.config, 'bos_token_id'):
-            if model.config.bos_token_id != tokenizer.bos_token_id:
-                model.config.bos_token_id = tokenizer.bos_token_id
-        else:
-            model.config.bos_token_id = tokenizer.bos_token_id
-        
-        # Resize model embeddings if we added new tokens (shouldn't happen with proper config)
-        if len(tokenizer) > model.config.vocab_size:
-            logger.info(f"Resizing model embeddings from {model.config.vocab_size} to {len(tokenizer)}")
-            model.resize_token_embeddings(len(tokenizer))
         
         global_medical_models[model_name] = model
         global_medical_tokenizers[model_name] = tokenizer
         logger.info(f"Medical model {model_name} initialized successfully")
-        logger.info(f"Tokenizer config: pad_token={tokenizer.pad_token}, eos_token={tokenizer.eos_token}")
+        logger.info(f"Tokenizer: pad_token={tokenizer.pad_token}, eos_token={tokenizer.eos_token}, bos_token={tokenizer.bos_token}")
     return global_medical_models[model_name], global_medical_tokenizers[model_name]
 
 
@@ -225,34 +119,40 @@ def generate_with_medswin(
     stopping_criteria: StoppingCriteriaList
 ):
     """
-    Generate text with MedSwin model - GPU only
+    Generate text with MedSwin model - simplified inference for MedAlpaca-based models
     
-    This function only performs the actual model inference on GPU.
-    All other operations (prompt preparation, post-processing) should be done outside.
-    
-    Note: This function is NOT decorated with @spaces.GPU because it's called from a thread
-    with unpicklable objects (threading.Event, TextIteratorStreamer). The model is already
-    on GPU (initialized with device_map="auto"), so the decorator is not needed.
+    This function performs tokenization and model inference.
+    The model is already on GPU (initialized with device_map="auto").
     """
-    # Tokenize prompt (this is a CPU operation but happens here for simplicity)
-    # The actual GPU work is in model.generate()
-    inputs = medical_tokenizer(prompt, return_tensors="pt").to(medical_model_obj.device)
+    # Tokenize prompt - this is where tokenization should happen (only once)
+    inputs = medical_tokenizer(
+        prompt, 
+        return_tensors="pt",
+        padding=False,  # No padding for single sequence
+        truncation=False  # Don't truncate, let model handle it
+    ).to(medical_model_obj.device)
     
-    # Prepare generation kwargs
-    generation_kwargs = dict(
+    # Get actual prompt length for stopping criteria
+    prompt_length = inputs['input_ids'].shape[1]
+    
+    # Update stopping criteria with actual prompt length if needed
+    # (The stopping criteria is already set in app.py, but we can verify it here)
+    
+    # Prepare generation kwargs - simplified for MedAlpaca models
+    generation_kwargs = {
         **inputs,
-        streamer=streamer,
-        max_new_tokens=max_new_tokens,
-        temperature=temperature,
-        top_p=top_p,
-        top_k=top_k,
-        repetition_penalty=penalty,
-        do_sample=True,
-        stopping_criteria=stopping_criteria,
-        eos_token_id=eos_token_id,
-        pad_token_id=pad_token_id
-    )
+        "streamer": streamer,
+        "max_new_tokens": max_new_tokens,
+        "temperature": temperature,
+        "top_p": top_p,
+        "top_k": top_k,
+        "repetition_penalty": penalty,
+        "do_sample": True,
+        "stopping_criteria": stopping_criteria,
+        "eos_token_id": eos_token_id,
+        "pad_token_id": pad_token_id
+    }
     
-    # Run generation on GPU - this is the only GPU operation
+    # Run generation on GPU
     medical_model_obj.generate(**generation_kwargs)
 
