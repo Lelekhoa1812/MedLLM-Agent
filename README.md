@@ -25,7 +25,8 @@ tags:
 ## ✨ Key Features
 
 ### 📄 **Document RAG (Retrieval-Augmented Generation)**
-- Upload medical documents (PDF/TXT) and get answers based on your uploaded content
+- Upload medical documents (PDF, Word, TXT, MD, JSON, XML, CSV) and get answers based on your uploaded content
+- Document parsing powered by Gemini MCP for accurate text extraction
 - Hierarchical document indexing with auto-merging retrieval
 - Mitigates hallucination by grounding responses in your documents
 - Toggle RAG on/off - when disabled, provides concise clinical answers without document context
@@ -35,7 +36,7 @@ tags:
 - **Automatic Fallback**: Gracefully falls back to direct library calls if MCP is not configured
 - **Configurable MCP Servers**: Connect to any MCP-compatible search server via environment variables
 - **Content Extraction**: Automatically fetches and extracts full content from search results using MCP tools
-- **Automatic Summarization**: Summarizes web search results using DeepSeek-R1
+- **Automatic Summarization**: Summarizes web search results using Gemini MCP
 - **Enriches Context**: Combines document RAG + web sources for comprehensive answers
 
 ### 🧠 **MedSwin Medical Specialist Models**
@@ -50,12 +51,12 @@ tags:
 - Non-English queries automatically translated to English
 - Medical model processes in English
 - Responses translated back to original language
-- Powered by DeepSeek-R1-8B for translation
+- Powered by Gemini MCP for translation
 
 ### 🎤 **Voice Features**
-- **Speech-to-Text**: Microphone icon for voice input transcription using OpenAI Whisper Large-v3-Turbo
+- **Speech-to-Text**: Microphone icon for voice input transcription using Gemini MCP
 - **Text-to-Speech**: Speaker icon in responses to generate voice output using Maya1 TTS model
-- Both models preloaded on startup for instant voice interactions
+- Speech-to-text powered by Gemini MCP for accurate transcription
 
 ### ⚙️ **Advanced Configuration**
 - Customizable generation parameters (temperature, top-p, top-k)
@@ -66,7 +67,7 @@ tags:
 
 ## 🚀 Usage
 
-1. **Upload Documents**: Drag and drop PDF or text files containing medical information
+1. **Upload Documents**: Drag and drop PDF, Word, or text files containing medical information
 2. **Configure Settings**: 
    - Enable/disable Document RAG
    - Enable/disable Web Search (MCP)
@@ -80,16 +81,17 @@ tags:
 ## 🔧 Technical Details
 
 - **Medical Models**: MedSwin/MedSwin-7B-SFT, MedSwin-7B-KD, MedSwin-Merged-TA-SFT-0.7
-- **Translation Model**: deepseek-ai/DeepSeek-R1-0528-Qwen3-8B
-- **Speech-to-Text**: openai/whisper-large-v3-turbo
+- **Translation**: Gemini MCP (gemini-2.5-flash-lite for simple tasks)
+- **Document Parsing**: Gemini MCP (supports PDF, Word, TXT, MD, JSON, XML, CSV)
+- **Speech-to-Text**: Gemini MCP (gemini-2.5-flash-lite)
+- **Summarization**: Gemini MCP (gemini-2.5-flash for complex tasks)
+- **Reasoning & Reflection**: Gemini MCP (gemini-2.5-flash)
 - **Text-to-Speech**: maya-research/maya1
 - **Embedding Model**: abhinand/MedEmbed-large-v0.1 (domain-tuned medical embeddings)
 - **RAG Framework**: LlamaIndex with hierarchical node parsing
 - **Web Search**: Model Context Protocol (MCP) tools with automatic fallback to DuckDuckGo
-- **Speech-to-Text**: MCP Whisper integration with local Whisper fallback
-- **Text-to-Speech**: MCP TTS integration with local TTS fallback
-- **Translation**: MCP translation tools with local DeepSeek-R1 fallback
 - **MCP Client**: Python MCP SDK for standardized tool integration
+- **Gemini MCP Server**: aistudio-mcp-server via MCP protocol
 
 ## 📋 Requirements
 
@@ -102,51 +104,63 @@ See `requirements.txt` for full dependency list. Key dependencies:
 
 ### 🔌 MCP Configuration
 
-The application supports MCP (Model Context Protocol) tools for various services. Configure MCP servers via environment variables:
+The application uses Gemini MCP (Model Context Protocol) for translation, document parsing, transcription, and summarization. Configure Gemini MCP server via environment variables:
 
 ```bash
-# Web Search MCP Server
-export MCP_SERVER_COMMAND="python"
-export MCP_SERVER_ARGS="-m duckduckgo_mcp_server"
+# Gemini MCP Server (required)
+export GEMINI_API_KEY="your-gemini-api-key"
 
-# Or use npx for Node.js MCP servers
+# Gemini MCP Server Configuration
 export MCP_SERVER_COMMAND="npx"
-export MCP_SERVER_ARGS="-y @modelcontextprotocol/server-duckduckgo"
+export MCP_SERVER_ARGS="-y @aistudio-mcp/server"
+
+# Optional Gemini Configuration
+export GEMINI_MODEL="gemini-2.5-flash"  # For harder tasks (default)
+export GEMINI_MODEL_LITE="gemini-2.5-flash-lite"  # For parsing and simple tasks (default)
+export GEMINI_TIMEOUT=300000  # Request timeout in milliseconds (default: 5 minutes)
+export GEMINI_MAX_OUTPUT_TOKENS=8192  # Maximum output tokens (default)
+export GEMINI_MAX_FILES=10  # Maximum number of files per request (default)
+export GEMINI_MAX_TOTAL_FILE_SIZE=50  # Maximum total file size in MB (default)
+export GEMINI_TEMPERATURE=0.2  # Temperature for generation 0-2 (default: 0.2)
 ```
 
-**Available MCP Tools:**
-- **Web Search**: DuckDuckGo search via MCP (automatic fallback to direct API)
-- **Speech-to-Text**: Whisper transcription via MCP (automatic fallback to local Whisper)
-- **Text-to-Speech**: TTS generation via MCP (automatic fallback to local TTS)
-- **Translation**: Multi-language translation via MCP (automatic fallback to local DeepSeek-R1)
+**Available Gemini MCP Tools:**
+- **Translation**: Multi-language translation using Gemini MCP (gemini-2.5-flash-lite)
+- **Document Parsing**: Extract text from PDF, Word, and other documents using Gemini MCP
+- **Speech-to-Text**: Audio transcription using Gemini MCP (gemini-2.5-flash-lite)
+- **Summarization**: Web content summarization using Gemini MCP (gemini-2.5-flash)
+- **Reasoning & Reflection**: Query analysis and answer quality evaluation using Gemini MCP
 
-The application automatically detects and uses MCP tools when available, falling back to local implementations seamlessly.
+**Supported File Types for Document Parsing:**
+- Documents: PDF, DOC, DOCX (treated as images, one page = one image)
+- Text: TXT, MD, JSON, XML, CSV
+- Images: JPG, JPEG, PNG, GIF, WebP, SVG, BMP, TIFF
+- Audio: MP3, WAV, AIFF, AAC, OGG, FLAC (up to 15MB per file)
+- Video: MP4, AVI, MOV, WEBM, FLV, MPG, WMV (up to 10 files per request)
 
 1. **Install MCP Python SDK** (already in requirements.txt):
    ```bash
    pip install mcp nest-asyncio
    ```
 
-2. **Install an MCP Server** (e.g., DuckDuckGo MCP server):
+2. **Install Gemini MCP Server**:
    ```bash
-   pip install duckduckgo-mcp-server
-   # OR using npx (Node.js):
-   # npx -y @modelcontextprotocol/server-duckduckgo
+   # Using npx (Node.js) - recommended
+   npx -y @aistudio-mcp/server
    ```
 
-3. **Configure via Environment Variables** (optional):
+3. **Get Gemini API Key**:
+   - Visit [Google AI Studio](https://aistudio.google.com/) to get your API key
+   - Set it as an environment variable: `export GEMINI_API_KEY="your-api-key"`
+
+4. **Configure via Environment Variables**:
    ```bash
-   export MCP_SERVER_COMMAND="python"
-   export MCP_SERVER_ARGS="-m duckduckgo_mcp_server"
-   ```
-   
-   Or for Node.js-based MCP servers:
-   ```bash
+   export GEMINI_API_KEY="your-gemini-api-key"
    export MCP_SERVER_COMMAND="npx"
-   export MCP_SERVER_ARGS="-y @modelcontextprotocol/server-duckduckgo"
+   export MCP_SERVER_ARGS="-y @aistudio-mcp/server"
    ```
 
-**Note**: If MCP is not configured, the application automatically falls back to direct library calls (`requests`, `BeautifulSoup`) for web search functionality. For full fallback support including DuckDuckGo search, you may need to install `ddgs` separately, though it's recommended to use MCP for better integration and reliability.
+**Note**: The application requires Gemini MCP for translation, document parsing, transcription, and summarization. Web search functionality still supports fallback to direct library calls if MCP is not configured.
 
 ## 🎯 Use Cases
 
@@ -235,9 +249,10 @@ MedLLM Agent is designed to support **doctors, clinicians, and medical specialis
    - Step 6: Self-reflection on answer quality
 
 3. **Autonomous Execution** → System executes plan:
-   - Retrieves relevant patient history from documents
+   - Retrieves relevant patient history from documents (parsed via Gemini MCP)
    - Searches web for latest ADA/ADA-EASD guidelines using MCP tools
    - Fetches and extracts full content from search results via MCP
+   - Summarizes web content using Gemini MCP
    - Synthesizes information considering age and renal function
    - Generates evidence-based treatment recommendations
 
