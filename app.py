@@ -31,6 +31,15 @@ from llama_index.core.retrievers import AutoMergingRetriever
 from llama_index.core.storage.docstore import SimpleDocumentStore
 from llama_index.llms.huggingface import HuggingFaceLLM
 from llama_index.embeddings.huggingface import HuggingFaceEmbedding
+# Import GPU-tagged model functions
+from model import (
+    get_llm_for_rag as get_llm_for_rag_gpu,
+    get_embedding_model as get_embedding_model_gpu,
+    generate_with_medswin,
+    initialize_medical_model,
+    global_medical_models,
+    global_medical_tokenizers
+)
 from tqdm import tqdm
 from langdetect import detect, LangDetectException
 # MCP imports
@@ -189,9 +198,8 @@ CSS = """
 }
 """
 
-# Global model storage
-global_medical_models = {}
-global_medical_tokenizers = {}
+# Global model storage - models are stored in model.py
+# Import the global model storage from model.py
 global_file_info = {}
 global_tts_model = None
 
@@ -454,24 +462,7 @@ async def call_agent(user_prompt: str, system_prompt: str = None, files: list = 
         logger.debug(traceback.format_exc())
         return ""
 
-def initialize_medical_model(model_name: str):
-    """Initialize medical model (MedSwin) - download on demand"""
-    global global_medical_models, global_medical_tokenizers
-    if model_name not in global_medical_models or global_medical_models[model_name] is None:
-        logger.info(f"Initializing medical model: {model_name}...")
-        model_path = MEDSWIN_MODELS[model_name]
-        tokenizer = AutoTokenizer.from_pretrained(model_path, token=HF_TOKEN)
-        model = AutoModelForCausalLM.from_pretrained(
-            model_path,
-            device_map="auto",
-            trust_remote_code=True,
-            token=HF_TOKEN,
-            torch_dtype=torch.float16
-        )
-        global_medical_models[model_name] = model
-        global_medical_tokenizers[model_name] = tokenizer
-        logger.info(f"Medical model {model_name} initialized successfully")
-    return global_medical_models[model_name], global_medical_tokenizers[model_name]
+# initialize_medical_model is now imported from model.py
 
 
 def initialize_tts_model():
@@ -1038,23 +1029,7 @@ def summarize_web_content(content_list: list, query: str) -> str:
         return content_list[0].get('content', '')[:500]
     return ""
 
-def get_llm_for_rag(temperature=0.7, max_new_tokens=256, top_p=0.95, top_k=50):
-    """Get LLM for RAG indexing (uses medical model)"""
-    # Use medical model for RAG indexing instead of translation model
-    medical_model_obj, medical_tokenizer = initialize_medical_model(DEFAULT_MEDICAL_MODEL)
-    
-    return HuggingFaceLLM(
-        context_window=4096,
-        max_new_tokens=max_new_tokens,
-        tokenizer=medical_tokenizer,
-        model=medical_model_obj,
-        generate_kwargs={
-            "do_sample": True,
-            "temperature": temperature,
-            "top_k": top_k,
-            "top_p": top_p
-        }
-    )
+# get_llm_for_rag is now imported from model.py as get_llm_for_rag_gpu
 
 async def autonomous_reasoning_gemini(query: str) -> dict:
     """Autonomous reasoning using Gemini MCP"""
@@ -1450,7 +1425,6 @@ def extract_text_from_document(file):
         logger.error(f"Error processing document: {e}")
         return None, 0, ValueError(f"Error processing {file_extension} file: {str(e)}")
 
-@spaces.GPU(max_duration=120)
 def create_or_update_index(files, request: gr.Request):
     global global_file_info
     
@@ -1460,9 +1434,9 @@ def create_or_update_index(files, request: gr.Request):
     start_time = time.time()
     user_id = request.session_hash
     save_dir = f"./{user_id}_index"
-    # Initialize LlamaIndex modules
-    llm = get_llm_for_rag()
-    embed_model = HuggingFaceEmbedding(model_name=EMBEDDING_MODEL, token=HF_TOKEN)
+    # Initialize LlamaIndex modules - use GPU functions for model inference only
+    llm = get_llm_for_rag_gpu()
+    embed_model = get_embedding_model_gpu()
     Settings.llm = llm
     Settings.embed_model = embed_model
     file_stats = []
@@ -1557,7 +1531,6 @@ def create_or_update_index(files, request: gr.Request):
     output_container += "</div>"
     return f"Successfully indexed {len(files)} files.", output_container
 
-@spaces.GPU(max_duration=120)
 def stream_chat(
     message: str,
     history: list,
@@ -1630,7 +1603,8 @@ def stream_chat(
     rag_context = ""
     source_info = ""
     if final_use_rag and has_rag_index:
-        embed_model = HuggingFaceEmbedding(model_name=EMBEDDING_MODEL, token=HF_TOKEN)
+        # Use GPU function for embedding model
+        embed_model = get_embedding_model_gpu()
         Settings.embed_model = embed_model
         storage_context = StorageContext.from_defaults(persist_dir=index_dir)
         index = load_index_from_storage(storage_context, settings=Settings)
@@ -1775,21 +1749,25 @@ def stream_chat(
     top_k = int(top_k) if isinstance(top_k, (int, float)) else 50
     penalty = float(penalty) if isinstance(penalty, (int, float)) else 1.2
     
-    generation_kwargs = dict(
-        inputs,
-        streamer=streamer,
-        max_new_tokens=max_new_tokens,
-        temperature=temperature,
-        top_p=top_p,
-        top_k=top_k,
-        repetition_penalty=penalty,
-        do_sample=True,
-        stopping_criteria=stopping_criteria,
-        eos_token_id=eos_token_id,
-        pad_token_id=medical_tokenizer.pad_token_id or eos_token_id
+    # Call GPU function for model inference only
+    thread = threading.Thread(
+        target=generate_with_medswin,
+        kwargs={
+            "medical_model_obj": medical_model_obj,
+            "medical_tokenizer": medical_tokenizer,
+            "prompt": prompt,
+            "max_new_tokens": max_new_tokens,
+            "temperature": temperature,
+            "top_p": top_p,
+            "top_k": top_k,
+            "penalty": penalty,
+            "eos_token_id": eos_token_id,
+            "pad_token_id": medical_tokenizer.pad_token_id or eos_token_id,
+            "stop_event": stop_event,
+            "streamer": streamer,
+            "stopping_criteria": stopping_criteria
+        }
     )
-    
-    thread = threading.Thread(target=medical_model_obj.generate, kwargs=generation_kwargs)
     thread.start()
     
     updated_history = history + [
