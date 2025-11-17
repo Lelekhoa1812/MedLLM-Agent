@@ -1,6 +1,6 @@
 import gradio as gr
 import os
-import PyPDF2
+import base64
 import logging
 import torch
 import threading
@@ -33,7 +33,6 @@ from llama_index.llms.huggingface import HuggingFaceLLM
 from llama_index.embeddings.huggingface import HuggingFaceEmbedding
 from tqdm import tqdm
 from langdetect import detect, LangDetectException
-import whisper
 # MCP imports
 try:
     from mcp import ClientSession, StdioServerParameters
@@ -67,7 +66,6 @@ logger = logging.getLogger(__name__)
 hf_logging.set_verbosity_error()
 
 # Model configurations
-TRANSLATION_MODEL = "deepseek-ai/DeepSeek-R1-0528-Qwen3-8B"
 MEDSWIN_MODELS = {
     "MedSwin SFT": "MedSwin/MedSwin-7B-SFT",
     "MedSwin KD": "MedSwin/MedSwin-7B-KD",
@@ -75,11 +73,15 @@ MEDSWIN_MODELS = {
 }
 DEFAULT_MEDICAL_MODEL = "MedSwin TA"
 EMBEDDING_MODEL = "abhinand/MedEmbed-large-v0.1"  # Domain-tuned medical embedding model
-WHISPER_MODEL = "openai/whisper-large-v3-turbo"
 TTS_MODEL = "maya-research/maya1"
 HF_TOKEN = os.environ.get("HF_TOKEN")
 if not HF_TOKEN:
     raise ValueError("HF_TOKEN not found in environment variables")
+
+# Gemini MCP configuration
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
+GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")  # Default for harder tasks
+GEMINI_MODEL_LITE = os.environ.get("GEMINI_MODEL_LITE", "gemini-2.5-flash-lite")  # For parsing and simple tasks
 
 # Custom UI
 TITLE = "<h1><center>🩺 MedLLM Agent - Medical RAG & Web Search System</center></h1>"
@@ -188,12 +190,9 @@ CSS = """
 """
 
 # Global model storage
-global_translation_model = None
-global_translation_tokenizer = None
 global_medical_models = {}
 global_medical_tokenizers = {}
 global_file_info = {}
-global_whisper_model = None
 global_tts_model = None
 
 # MCP client storage
@@ -201,10 +200,10 @@ global_mcp_session = None
 global_mcp_stdio_ctx = None  # Store stdio context to keep it alive
 global_mcp_lock = threading.Lock()  # Lock for thread-safe session access
 # MCP server configuration via environment variables
-# Example: MCP_SERVER_COMMAND="python" MCP_SERVER_ARGS="-m duckduckgo_mcp_server"
-# Or: MCP_SERVER_COMMAND="npx" MCP_SERVER_ARGS="-y @modelcontextprotocol/server-duckduckgo"
-MCP_SERVER_COMMAND = os.environ.get("MCP_SERVER_COMMAND", "python")
-MCP_SERVER_ARGS = os.environ.get("MCP_SERVER_ARGS", "-m duckduckgo_mcp_server").split() if os.environ.get("MCP_SERVER_ARGS") else ["-m", "duckduckgo_mcp_server"]
+# Gemini MCP server: aistudio-mcp-server
+# Example: MCP_SERVER_COMMAND="npx" MCP_SERVER_ARGS="-y @aistudio-mcp/server"
+MCP_SERVER_COMMAND = os.environ.get("MCP_SERVER_COMMAND", "npx")
+MCP_SERVER_ARGS = os.environ.get("MCP_SERVER_ARGS", "-y @aistudio-mcp/server").split() if os.environ.get("MCP_SERVER_ARGS") else ["-y", "@aistudio-mcp/server"]
 
 async def get_mcp_session():
     """Get or create MCP client session with proper context management"""
@@ -265,20 +264,55 @@ async def get_mcp_session():
         global_mcp_stdio_ctx = None
         return None
 
-def initialize_translation_model():
-    """Initialize DeepSeek-R1 model for translation purposes"""
-    global global_translation_model, global_translation_tokenizer
-    if global_translation_model is None or global_translation_tokenizer is None:
-        logger.info("Initializing translation model (DeepSeek-R1-8B)...")
-        global_translation_tokenizer = AutoTokenizer.from_pretrained(TRANSLATION_MODEL, token=HF_TOKEN)
-        global_translation_model = AutoModelForCausalLM.from_pretrained(
-            TRANSLATION_MODEL,
-            device_map="auto",
-            trust_remote_code=True,
-            token=HF_TOKEN,
-            torch_dtype=torch.float16
-        )
-        logger.info("Translation model initialized successfully")
+async def call_gemini_mcp(user_prompt: str, system_prompt: str = None, files: list = None, model: str = None, temperature: float = 0.2) -> str:
+    """Call Gemini MCP generate_content tool"""
+    if not MCP_AVAILABLE:
+        return ""
+    
+    try:
+        session = await get_mcp_session()
+        if session is None:
+            return ""
+        
+        # Find generate_content tool
+        tools = await session.list_tools()
+        generate_tool = None
+        for tool in tools.tools:
+            if "generate_content" in tool.name.lower() or "generate" in tool.name.lower():
+                generate_tool = tool
+                logger.info(f"Found Gemini MCP tool: {tool.name}")
+                break
+        
+        if not generate_tool:
+            logger.warning("Gemini MCP generate_content tool not found")
+            return ""
+        
+        # Prepare arguments
+        arguments = {
+            "user_prompt": user_prompt
+        }
+        if system_prompt:
+            arguments["system_prompt"] = system_prompt
+        if files:
+            arguments["files"] = files
+        if model:
+            arguments["model"] = model
+        if temperature is not None:
+            arguments["temperature"] = temperature
+        
+        result = await session.call_tool(generate_tool.name, arguments=arguments)
+        
+        # Parse result
+        if hasattr(result, 'content') and result.content:
+            for item in result.content:
+                if hasattr(item, 'text'):
+                    return item.text.strip()
+        return ""
+    except Exception as e:
+        logger.error(f"Gemini MCP call error: {e}")
+        import traceback
+        logger.debug(traceback.format_exc())
+        return ""
 
 def initialize_medical_model(model_name: str):
     """Initialize medical model (MedSwin) - download on demand"""
@@ -299,57 +333,6 @@ def initialize_medical_model(model_name: str):
         logger.info(f"Medical model {model_name} initialized successfully")
     return global_medical_models[model_name], global_medical_tokenizers[model_name]
 
-def initialize_whisper_model():
-    """Initialize Whisper model for speech-to-text"""
-    global global_whisper_model
-    if global_whisper_model is None:
-        logger.info("Initializing Whisper model for speech transcription...")
-        try:
-            # Check if we're in a spaces environment (has spaces patching)
-            in_spaces_env = hasattr(torch, '_spaces_patched') or 'spaces' in str(type(torch.Tensor.to))
-            
-            # Try loading from HuggingFace with device handling for spaces compatibility
-            try:
-                if in_spaces_env:
-                    # In spaces environment, load on CPU and don't move to device
-                    logger.info("Detected spaces environment, loading Whisper on CPU")
-                    global_whisper_model = whisper.load_model("large-v3-turbo", device="cpu")
-                    # Don't move to GPU in spaces environment
-                else:
-                    # Normal environment, let whisper handle device
-                    global_whisper_model = whisper.load_model("large-v3-turbo")
-            except NotImplementedError as e:
-                # Handle sparse tensor error from spaces library
-                if "SparseTensorImpl" in str(e) or "storage" in str(e).lower():
-                    logger.warning(f"Spaces library compatibility issue: {e}")
-                    logger.info("Trying to load Whisper model with workaround...")
-                    try:
-                        # Try loading on CPU explicitly
-                        global_whisper_model = whisper.load_model("base", device="cpu")
-                    except Exception as e2:
-                        logger.error(f"Failed to load Whisper with workaround: {e2}")
-                        global_whisper_model = None
-                        return None
-                else:
-                    raise
-            except Exception as e1:
-                logger.warning(f"Failed to load large-v3-turbo: {e1}")
-                try:
-                    # Fallback to base model with CPU
-                    global_whisper_model = whisper.load_model("base", device="cpu")
-                except Exception as e2:
-                    logger.error(f"Failed to load Whisper base model: {e2}")
-                    # Set to None to indicate failure - will use MCP or skip transcription
-                    global_whisper_model = None
-                    return None
-        except Exception as e:
-            logger.error(f"Whisper model initialization error: {e}")
-            import traceback
-            logger.debug(traceback.format_exc())
-            global_whisper_model = None
-            return None
-        logger.info("Whisper model initialized successfully")
-    return global_whisper_model
 
 def initialize_tts_model():
     """Initialize TTS model for text-to-speech"""
@@ -368,46 +351,41 @@ def initialize_tts_model():
             global_tts_model = None
     return global_tts_model
 
-async def transcribe_audio_mcp(audio_path: str) -> str:
-    """Transcribe audio using MCP Whisper tool"""
+async def transcribe_audio_gemini(audio_path: str) -> str:
+    """Transcribe audio using Gemini MCP"""
     if not MCP_AVAILABLE:
         return ""
     
     try:
-        # Get MCP session
-        session = await get_mcp_session()
-        if session is None:
-            return ""
+        # Ensure we have an absolute path
+        audio_path_abs = os.path.abspath(audio_path)
         
-        # Find Whisper tool
-        tools = await session.list_tools()
-        whisper_tool = None
-        for tool in tools.tools:
-            if "whisper" in tool.name.lower() or "transcribe" in tool.name.lower() or "speech" in tool.name.lower():
-                whisper_tool = tool
-                logger.info(f"Found MCP Whisper tool: {tool.name}")
-                break
+        # Prepare file object for Gemini MCP using path (as per Gemini MCP documentation)
+        files = [{
+            "path": audio_path_abs
+        }]
         
-        if whisper_tool:
-            result = await session.call_tool(
-                whisper_tool.name,
-                arguments={"audio_path": audio_path, "language": "en"}
-            )
-            
-            # Parse result
-            if hasattr(result, 'content') and result.content:
-                for item in result.content:
-                    if hasattr(item, 'text'):
-                        return item.text.strip()
-        return ""
+        # Use exact prompts from Gemini MCP documentation
+        system_prompt = "You are a professional transcription service. Provide accurate, well-formatted transcripts."
+        user_prompt = "Please transcribe this audio file. Include speaker identification if multiple speakers are present, and format it with proper punctuation and paragraphs, remove mumble, ignore non-verbal noises."
+        
+        result = await call_gemini_mcp(
+            user_prompt=user_prompt,
+            system_prompt=system_prompt,
+            files=files,
+            model=GEMINI_MODEL_LITE,  # Use lite model for transcription
+            temperature=0.2
+        )
+        
+        return result.strip()
     except Exception as e:
-        logger.debug(f"MCP transcription error: {e}")
+        logger.error(f"Gemini transcription error: {e}")
+        import traceback
+        logger.debug(traceback.format_exc())
         return ""
 
 def transcribe_audio(audio):
-    """Transcribe audio to text using Whisper (with MCP fallback)"""
-    global global_whisper_model
-    
+    """Transcribe audio to text using Gemini MCP"""
     if audio is None:
         return ""
     
@@ -425,40 +403,29 @@ def transcribe_audio(audio):
         else:
             audio_path = audio
         
-        # Try MCP first if available
+        # Use Gemini MCP for transcription
         if MCP_AVAILABLE:
             try:
                 loop = asyncio.get_event_loop()
                 if loop.is_running():
                     try:
                         import nest_asyncio
-                        transcribed = nest_asyncio.run(transcribe_audio_mcp(audio_path))
+                        transcribed = nest_asyncio.run(transcribe_audio_gemini(audio_path))
                         if transcribed:
-                            logger.info(f"Transcribed via MCP: {transcribed}")
+                            logger.info(f"Transcribed via Gemini MCP: {transcribed[:50]}...")
                             return transcribed
-                    except:
-                        pass
+                    except Exception as e:
+                        logger.error(f"Error in nested async transcription: {e}")
                 else:
-                    transcribed = loop.run_until_complete(transcribe_audio_mcp(audio_path))
+                    transcribed = loop.run_until_complete(transcribe_audio_gemini(audio_path))
                     if transcribed:
-                        logger.info(f"Transcribed via MCP: {transcribed}")
+                        logger.info(f"Transcribed via Gemini MCP: {transcribed[:50]}...")
                         return transcribed
             except Exception as e:
-                logger.debug(f"MCP transcription not available: {e}")
+                logger.error(f"Gemini MCP transcription error: {e}")
         
-        # Fallback to local Whisper model
-        if global_whisper_model is None:
-            initialize_whisper_model()
-        
-        if global_whisper_model is None:
-            logger.warning("Whisper model not available and MCP not working")
-            return ""
-        
-        # Transcribe
-        result = global_whisper_model.transcribe(audio_path, language="en")
-        transcribed_text = result["text"].strip()
-        logger.info(f"Transcribed: {transcribed_text}")
-        return transcribed_text
+        logger.warning("Gemini MCP transcription not available")
+        return ""
     except Exception as e:
         logger.error(f"Transcription error: {e}")
         return ""
@@ -594,103 +561,52 @@ def detect_language(text: str) -> str:
     except LangDetectException:
         return "en"  # Default to English if detection fails
 
-async def translate_text_mcp(text: str, target_lang: str = "en", source_lang: str = None) -> str:
-    """Translate text using MCP translation tool"""
-    if not MCP_AVAILABLE:
-        return ""
-    
-    try:
-        # Get MCP session
-        session = await get_mcp_session()
-        if session is None:
-            return ""
-        
-        # Find translation tool
-        tools = await session.list_tools()
-        translate_tool = None
-        for tool in tools.tools:
-            if "translate" in tool.name.lower() or "translation" in tool.name.lower():
-                translate_tool = tool
-                logger.info(f"Found MCP translation tool: {tool.name}")
-                break
-        
-        if translate_tool:
-            args = {"text": text, "target_language": target_lang}
-            if source_lang:
-                args["source_language"] = source_lang
-            
-            result = await session.call_tool(
-                translate_tool.name,
-                arguments=args
-            )
-            
-            # Parse result
-            if hasattr(result, 'content') and result.content:
-                for item in result.content:
-                    if hasattr(item, 'text'):
-                        return item.text.strip()
-        return ""
-    except Exception as e:
-        logger.debug(f"MCP translation error: {e}")
-        return ""
-
-def translate_text(text: str, target_lang: str = "en", source_lang: str = None) -> str:
-    """Translate text using DeepSeek-R1 model (with MCP fallback)"""
-    # Try MCP first if available
-    if MCP_AVAILABLE:
-        try:
-            loop = asyncio.get_event_loop()
-            if loop.is_running():
-                try:
-                    import nest_asyncio
-                    translated = nest_asyncio.run(translate_text_mcp(text, target_lang, source_lang))
-                    if translated:
-                        logger.info(f"Translated via MCP: {translated[:50]}...")
-                        return translated
-                except:
-                    pass
-            else:
-                translated = loop.run_until_complete(translate_text_mcp(text, target_lang, source_lang))
-                if translated:
-                    logger.info(f"Translated via MCP: {translated[:50]}...")
-                    return translated
-        except Exception as e:
-            logger.debug(f"MCP translation not available: {e}")
-    
-    # Fallback to local translation model
-    global global_translation_model, global_translation_tokenizer
-    if global_translation_model is None or global_translation_tokenizer is None:
-        initialize_translation_model()
-    
+async def translate_text_gemini(text: str, target_lang: str = "en", source_lang: str = None) -> str:
+    """Translate text using Gemini MCP"""
     if source_lang:
-        prompt = f"Translate the following {source_lang} text to {target_lang}. Only provide the translation, no explanations:\n\n{text}"
+        user_prompt = f"Translate the following {source_lang} text to {target_lang}. Only provide the translation, no explanations:\n\n{text}"
     else:
-        prompt = f"Translate the following text to {target_lang}. Only provide the translation, no explanations:\n\n{text}"
+        user_prompt = f"Translate the following text to {target_lang}. Only provide the translation, no explanations:\n\n{text}"
     
-    messages = [
-        {"role": "system", "content": "You are a professional translator. Translate accurately and concisely."},
-        {"role": "user", "content": prompt}
-    ]
+    # Use concise system prompt
+    system_prompt = "You are a professional translator. Translate accurately and concisely."
     
-    prompt_text = global_translation_tokenizer.apply_chat_template(
-        messages,
-        tokenize=False,
-        add_generation_prompt=True
+    result = await call_gemini_mcp(
+        user_prompt=user_prompt,
+        system_prompt=system_prompt,
+        model=GEMINI_MODEL_LITE,  # Use lite model for translation
+        temperature=0.2
     )
     
-    inputs = global_translation_tokenizer(prompt_text, return_tensors="pt").to(global_translation_model.device)
+    return result.strip()
+
+def translate_text(text: str, target_lang: str = "en", source_lang: str = None) -> str:
+    """Translate text using Gemini MCP"""
+    if not MCP_AVAILABLE:
+        logger.warning("Gemini MCP not available for translation")
+        return text  # Return original text if translation fails
     
-    with torch.no_grad():
-        outputs = global_translation_model.generate(
-            **inputs,
-            max_new_tokens=512,
-            temperature=0.3,
-            do_sample=True,
-            pad_token_id=global_translation_tokenizer.eos_token_id
-        )
+    try:
+        loop = asyncio.get_event_loop()
+        if loop.is_running():
+            try:
+                import nest_asyncio
+                translated = nest_asyncio.run(translate_text_gemini(text, target_lang, source_lang))
+                if translated:
+                    logger.info(f"Translated via Gemini MCP: {translated[:50]}...")
+                    return translated
+            except Exception as e:
+                logger.error(f"Error in nested async translation: {e}")
+        else:
+            translated = loop.run_until_complete(translate_text_gemini(text, target_lang, source_lang))
+            if translated:
+                logger.info(f"Translated via Gemini MCP: {translated[:50]}...")
+                return translated
+    except Exception as e:
+        logger.error(f"Gemini MCP translation error: {e}")
     
-    response = global_translation_tokenizer.decode(outputs[0][inputs['input_ids'].shape[1]:], skip_special_tokens=True)
-    return response.strip()
+    # Return original text if translation fails
+    return text
 
 async def search_web_mcp(query: str, max_results: int = 5) -> list:
     """Search web using MCP tools"""
@@ -898,15 +814,11 @@ def search_web(query: str, max_results: int = 5) -> list:
     else:
         return search_web_fallback(query, max_results)
 
-def summarize_web_content(content_list: list, query: str) -> str:
-    """Summarize web search results using DeepSeek-R1 model"""
-    global global_translation_model, global_translation_tokenizer
-    if global_translation_model is None or global_translation_tokenizer is None:
-        initialize_translation_model()
-    
+async def summarize_web_content_gemini(content_list: list, query: str) -> str:
+    """Summarize web search results using Gemini MCP"""
     combined_content = "\n\n".join([f"Source: {item['title']}\n{item['content']}" for item in content_list[:3]])
     
-    prompt = f"""Summarize the following web search results related to the query: "{query}"
+    user_prompt = f"""Summarize the following web search results related to the query: "{query}"
 
 Extract key medical information, facts, and insights. Be concise and focus on reliable information.
 
@@ -915,41 +827,59 @@ Search Results:
 
 Summary:"""
     
-    messages = [
-        {"role": "system", "content": "You are a medical information summarizer. Extract and summarize key medical facts accurately."},
-        {"role": "user", "content": prompt}
-    ]
+    # Use concise system prompt
+    system_prompt = "You are a medical information summarizer. Extract and summarize key medical facts accurately."
     
-    prompt_text = global_translation_tokenizer.apply_chat_template(
-        messages,
-        tokenize=False,
-        add_generation_prompt=True
+    result = await call_gemini_mcp(
+        user_prompt=user_prompt,
+        system_prompt=system_prompt,
+        model=GEMINI_MODEL,  # Use full model for summarization
+        temperature=0.5
     )
     
-    inputs = global_translation_tokenizer(prompt_text, return_tensors="pt").to(global_translation_model.device)
+    return result.strip()
+
+def summarize_web_content(content_list: list, query: str) -> str:
+    """Summarize web search results using Gemini MCP"""
+    if not MCP_AVAILABLE:
+        logger.warning("Gemini MCP not available for summarization")
+        # Fallback: return first result's content
+        if content_list:
+            return content_list[0].get('content', '')[:500]
+        return ""
     
-    with torch.no_grad():
-        outputs = global_translation_model.generate(
-            **inputs,
-            max_new_tokens=512,
-            temperature=0.5,
-            do_sample=True,
-            pad_token_id=global_translation_tokenizer.eos_token_id
-        )
+    try:
+        loop = asyncio.get_event_loop()
+        if loop.is_running():
+            try:
+                import nest_asyncio
+                summary = nest_asyncio.run(summarize_web_content_gemini(content_list, query))
+                if summary:
+                    return summary
+            except Exception as e:
+                logger.error(f"Error in nested async summarization: {e}")
+        else:
+            summary = loop.run_until_complete(summarize_web_content_gemini(content_list, query))
+            if summary:
+                return summary
+    except Exception as e:
+        logger.error(f"Gemini MCP summarization error: {e}")
     
-    summary = global_translation_tokenizer.decode(outputs[0][inputs['input_ids'].shape[1]:], skip_special_tokens=True)
-    return summary.strip()
+    # Fallback: return first result's content
+    if content_list:
+        return content_list[0].get('content', '')[:500]
+    return ""
 
 def get_llm_for_rag(temperature=0.7, max_new_tokens=256, top_p=0.95, top_k=50):
-    """Get LLM for RAG indexing (uses translation model)"""
-    if global_translation_model is None or global_translation_tokenizer is None:
-        initialize_translation_model()
+    """Get LLM for RAG indexing (uses medical model)"""
+    # Use medical model for RAG indexing instead of translation model
+    medical_model_obj, medical_tokenizer = initialize_medical_model(DEFAULT_MEDICAL_MODEL)
     
     return HuggingFaceLLM(
         context_window=4096,
         max_new_tokens=max_new_tokens,
-        tokenizer=global_translation_tokenizer,
-        model=global_translation_model,
+        tokenizer=medical_tokenizer,
+        model=medical_model_obj,
         generate_kwargs={
             "do_sample": True,
             "temperature": temperature,
@@ -958,15 +888,8 @@ def get_llm_for_rag(temperature=0.7, max_new_tokens=256, top_p=0.95, top_k=50):
         }
     )
 
-def autonomous_reasoning(query: str, history: list) -> dict:
-    """
-    Autonomous reasoning: Analyze query complexity, intent, and information needs.
-    Returns reasoning analysis with query type, complexity, and required information sources.
-    """
-    global global_translation_model, global_translation_tokenizer
-    if global_translation_model is None or global_translation_tokenizer is None:
-        initialize_translation_model()
-    
+async def autonomous_reasoning_gemini(query: str) -> dict:
+    """Autonomous reasoning using Gemini MCP"""
     reasoning_prompt = f"""Analyze this medical query and provide structured reasoning:
 
 Query: "{query}"
@@ -989,29 +912,15 @@ Respond in JSON format:
     "sub_questions": ["..."]
 }}"""
     
-    messages = [
-        {"role": "system", "content": "You are a medical reasoning system. Analyze queries systematically and provide structured JSON responses."},
-        {"role": "user", "content": reasoning_prompt}
-    ]
+    # Use concise system prompt
+    system_prompt = "You are a medical reasoning system. Analyze queries systematically and provide structured JSON responses."
     
-    prompt_text = global_translation_tokenizer.apply_chat_template(
-        messages,
-        tokenize=False,
-        add_generation_prompt=True
+    response = await call_gemini_mcp(
+        user_prompt=reasoning_prompt,
+        system_prompt=system_prompt,
+        model=GEMINI_MODEL,  # Use full model for reasoning
+        temperature=0.3
     )
-    
-    inputs = global_translation_tokenizer(prompt_text, return_tensors="pt").to(global_translation_model.device)
-    
-    with torch.no_grad():
-        outputs = global_translation_model.generate(
-            **inputs,
-            max_new_tokens=512,
-            temperature=0.3,
-            do_sample=True,
-            pad_token_id=global_translation_tokenizer.eos_token_id
-        )
-    
-    response = global_translation_tokenizer.decode(outputs[0][inputs['input_ids'].shape[1]:], skip_special_tokens=True)
     
     # Parse JSON response (with fallback)
     try:
@@ -1035,6 +944,46 @@ Respond in JSON format:
     
     logger.info(f"Reasoning analysis: {reasoning}")
     return reasoning
+
+def autonomous_reasoning(query: str, history: list) -> dict:
+    """
+    Autonomous reasoning: Analyze query complexity, intent, and information needs.
+    Returns reasoning analysis with query type, complexity, and required information sources.
+    """
+    if not MCP_AVAILABLE:
+        logger.warning("Gemini MCP not available for reasoning, using fallback")
+        # Fallback reasoning
+        return {
+            "query_type": "general_info",
+            "complexity": "moderate",
+            "information_needs": ["medical information"],
+            "requires_rag": True,
+            "requires_web_search": False,
+            "sub_questions": [query]
+        }
+    
+    try:
+        loop = asyncio.get_event_loop()
+        if loop.is_running():
+            try:
+                import nest_asyncio
+                return nest_asyncio.run(autonomous_reasoning_gemini(query))
+            except Exception as e:
+                logger.error(f"Error in nested async reasoning: {e}")
+        else:
+            return loop.run_until_complete(autonomous_reasoning_gemini(query))
+    except Exception as e:
+        logger.error(f"Gemini MCP reasoning error: {e}")
+    
+    # Fallback reasoning
+    return {
+        "query_type": "general_info",
+        "complexity": "moderate",
+        "information_needs": ["medical information"],
+        "requires_rag": True,
+        "requires_web_search": False,
+        "sub_questions": [query]
+    }
 
 def create_execution_plan(reasoning: dict, query: str, has_rag_index: bool) -> dict:
     """
@@ -1132,15 +1081,8 @@ def autonomous_execution_strategy(reasoning: dict, plan: dict, use_rag: bool, us
     
     return strategy
 
-def self_reflection(answer: str, query: str, reasoning: dict) -> dict:
-    """
-    Self-reflection: Evaluate answer quality and completeness.
-    Returns reflection with quality score and improvement suggestions.
-    """
-    global global_translation_model, global_translation_tokenizer
-    if global_translation_model is None or global_translation_tokenizer is None:
-        initialize_translation_model()
-    
+async def self_reflection_gemini(answer: str, query: str) -> dict:
+    """Self-reflection using Gemini MCP"""
     reflection_prompt = f"""Evaluate this medical answer for quality and completeness:
 
 Query: "{query}"
@@ -1163,31 +1105,16 @@ Respond in JSON:
     "improvement_suggestions": ["..."]
 }}"""
     
-    messages = [
-        {"role": "system", "content": "You are a medical answer quality evaluator. Provide honest, constructive feedback."},
-        {"role": "user", "content": reflection_prompt}
-    ]
+    # Use concise system prompt
+    system_prompt = "You are a medical answer quality evaluator. Provide honest, constructive feedback."
     
-    prompt_text = global_translation_tokenizer.apply_chat_template(
-        messages,
-        tokenize=False,
-        add_generation_prompt=True
+    response = await call_gemini_mcp(
+        user_prompt=reflection_prompt,
+        system_prompt=system_prompt,
+        model=GEMINI_MODEL,  # Use full model for reflection
+        temperature=0.3
     )
     
-    inputs = global_translation_tokenizer(prompt_text, return_tensors="pt").to(global_translation_model.device)
-    
-    with torch.no_grad():
-        outputs = global_translation_model.generate(
-            **inputs,
-            max_new_tokens=256,
-            temperature=0.3,
-            do_sample=True,
-            pad_token_id=global_translation_tokenizer.eos_token_id
-        )
-    
-    response = global_translation_tokenizer.decode(outputs[0][inputs['input_ids'].shape[1]:], skip_special_tokens=True)
-    
-    import json
     try:
         json_start = response.find('{')
         json_end = response.rfind('}') + 1
@@ -1201,19 +1128,139 @@ Respond in JSON:
     logger.info(f"Self-reflection score: {reflection.get('overall_score', 'N/A')}")
     return reflection
 
+def self_reflection(answer: str, query: str, reasoning: dict) -> dict:
+    """
+    Self-reflection: Evaluate answer quality and completeness.
+    Returns reflection with quality score and improvement suggestions.
+    """
+    if not MCP_AVAILABLE:
+        logger.warning("Gemini MCP not available for reflection, using fallback")
+        return {"overall_score": 7, "improvement_suggestions": []}
+    
+    try:
+        loop = asyncio.get_event_loop()
+        if loop.is_running():
+            try:
+                import nest_asyncio
+                return nest_asyncio.run(self_reflection_gemini(answer, query))
+            except Exception as e:
+                logger.error(f"Error in nested async reflection: {e}")
+        else:
+            return loop.run_until_complete(self_reflection_gemini(answer, query))
+    except Exception as e:
+        logger.error(f"Gemini MCP reflection error: {e}")
+    
+    return {"overall_score": 7, "improvement_suggestions": []}
+
+async def parse_document_gemini(file_path: str, file_extension: str) -> str:
+    """Parse document using Gemini MCP"""
+    if not MCP_AVAILABLE:
+        return ""
+    
+    try:
+        # Read file and encode to base64
+        with open(file_path, 'rb') as f:
+            file_content = base64.b64encode(f.read()).decode('utf-8')
+        
+        # Determine MIME type from file extension
+        mime_type_map = {
+            '.pdf': 'application/pdf',
+            '.doc': 'application/msword',
+            '.docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+            '.txt': 'text/plain',
+            '.md': 'text/markdown',
+            '.json': 'application/json',
+            '.xml': 'application/xml',
+            '.csv': 'text/csv'
+        }
+        mime_type = mime_type_map.get(file_extension, 'application/octet-stream')
+        
+        # Prepare file object for Gemini MCP (use content for base64)
+        files = [{
+            "content": file_content,
+            "type": mime_type
+        }]
+        
+        # Use concise system prompt
+        system_prompt = "Extract all text content from the document accurately."
+        user_prompt = "Extract all text content from this document. Return only the extracted text, preserving structure and formatting where possible."
+        
+        result = await call_gemini_mcp(
+            user_prompt=user_prompt,
+            system_prompt=system_prompt,
+            files=files,
+            model=GEMINI_MODEL_LITE,  # Use lite model for parsing
+            temperature=0.2
+        )
+        
+        return result.strip()
+    except Exception as e:
+        logger.error(f"Gemini document parsing error: {e}")
+        import traceback
+        logger.debug(traceback.format_exc())
+        return ""
+
 def extract_text_from_document(file):
+    """Extract text from document using Gemini MCP"""
     file_name = file.name
     file_extension = os.path.splitext(file_name)[1].lower()
     
+    # Handle text files directly
     if file_extension == '.txt':
         text = file.read().decode('utf-8')
         return text, len(text.split()), None
-    elif file_extension == '.pdf':
-        pdf_reader = PyPDF2.PdfReader(file)
-        text = "\n\n".join(page.extract_text() for page in pdf_reader.pages)
-        return text, len(text.split()), None
-    else:
-        return None, 0, ValueError(f"Unsupported file format: {file_extension}")
+    
+    # For PDF, Word, and other documents, use Gemini MCP
+    # Save file to temporary location for processing
+    try:
+        with tempfile.NamedTemporaryFile(delete=False, suffix=file_extension) as tmp_file:
+            # Write file content to temp file
+            file.seek(0)  # Reset file pointer
+            tmp_file.write(file.read())
+            tmp_file_path = tmp_file.name
+        
+        # Use Gemini MCP to parse document
+        if MCP_AVAILABLE:
+            try:
+                loop = asyncio.get_event_loop()
+                if loop.is_running():
+                    try:
+                        import nest_asyncio
+                        text = nest_asyncio.run(parse_document_gemini(tmp_file_path, file_extension))
+                    except Exception as e:
+                        logger.error(f"Error in nested async document parsing: {e}")
+                        text = ""
+                else:
+                    text = loop.run_until_complete(parse_document_gemini(tmp_file_path, file_extension))
+                
+                # Clean up temp file
+                try:
+                    os.unlink(tmp_file_path)
+                except:
+                    pass
+                
+                if text:
+                    return text, len(text.split()), None
+                else:
+                    return None, 0, ValueError(f"Failed to extract text from {file_extension} file using Gemini MCP")
+            except Exception as e:
+                logger.error(f"Gemini MCP document parsing error: {e}")
+                # Clean up temp file
+                try:
+                    os.unlink(tmp_file_path)
+                except:
+                    pass
+                return None, 0, ValueError(f"Error parsing {file_extension} file: {str(e)}")
+        else:
+            # Clean up temp file
+            try:
+                os.unlink(tmp_file_path)
+            except:
+                pass
+            return None, 0, ValueError(f"Gemini MCP not available. Cannot parse {file_extension} files.")
+    except Exception as e:
+        logger.error(f"Error processing document: {e}")
+        return None, 0, ValueError(f"Error processing {file_extension} file: {str(e)}")
 
 @spaces.GPU(max_duration=120)
 def create_or_update_index(files, request: gr.Request):
@@ -1611,7 +1658,7 @@ def create_demo():
                 file_upload = gr.File(
                     file_count="multiple",
                     label="Drag and Drop Files Here",
-                    file_types=[".pdf", ".txt"],
+                    file_types=[".pdf", ".txt", ".doc", ".docx", ".md", ".json", ".xml", ".csv"],
                     elem_id="file-upload"
                 )
                 upload_button = gr.Button("Upload & Index", elem_classes="upload-button")
@@ -1859,26 +1906,8 @@ def create_demo():
 if __name__ == "__main__":
     # Preload models on startup
     logger.info("Preloading models on startup...")
-    logger.info("Initializing translation model (DeepSeek-R1)...")
-    try:
-        initialize_translation_model()
-        logger.info("Translation model (DeepSeek-R1) preloaded successfully!")
-    except Exception as e:
-        logger.error(f"Translation model preloading failed: {e}")
-        logger.warning("Translation features may be limited")
     logger.info("Initializing default medical model (MedSwin TA)...")
     initialize_medical_model(DEFAULT_MEDICAL_MODEL)
-    logger.info("Preloading Whisper model...")
-    try:
-        initialize_whisper_model()
-        if global_whisper_model is not None:
-            logger.info("Whisper model preloaded successfully!")
-        else:
-            logger.warning("Whisper model not available - will use MCP or disable transcription")
-    except Exception as e:
-        logger.warning(f"Whisper model preloading failed: {e}")
-        logger.warning("Speech-to-text will use MCP or be disabled")
-        global_whisper_model = None
     logger.info("Preloading TTS model...")
     try:
         initialize_tts_model()
@@ -1889,6 +1918,13 @@ if __name__ == "__main__":
     except Exception as e:
         logger.warning(f"TTS model preloading failed: {e}")
         logger.warning("Text-to-speech will use MCP or be disabled")
+    
+    # Check Gemini MCP availability
+    if MCP_AVAILABLE:
+        logger.info("Gemini MCP is available for translation, summarization, document parsing, and transcription")
+    else:
+        logger.warning("Gemini MCP not available - translation, summarization, document parsing, and transcription features will be limited")
+    
     logger.info("Model preloading complete!")
     demo = create_demo()
     demo.launch()

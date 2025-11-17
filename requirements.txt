@@ -3,7 +3,6 @@ llama-index
 transformers
 torch
 sentence-transformers
-PyPDF2
 python-docx
 llama_index.llms.huggingface
 llama_index.embeddings.huggingface
@@ -13,7 +12,7 @@ sentencepiece>=0.1.99
 google-genai
 langdetect
 gradio
-# MCP dependencies (preferred)
+# MCP dependencies (required for Gemini MCP)
 mcp
 nest-asyncio
 # Fallback dependencies (used if MCP is not available)
@@ -21,7 +20,6 @@ requests
 beautifulsoup4
 ddgs
 spaces
-openai-whisper
 soundfile
 numpy<2.0.0
 setuptools>=65.0.0
