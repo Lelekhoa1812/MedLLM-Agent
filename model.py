@@ -130,7 +130,8 @@ def get_embedding_model():
     return HuggingFaceEmbedding(model_name=EMBEDDING_MODEL, token=HF_TOKEN)
 
 def _generate_with_medswin_internal(
-    model_name: str,
+    medical_model_obj,
+    medical_tokenizer,
     prompt: str,
     max_new_tokens: int,
     temperature: float,
@@ -140,21 +141,15 @@ def _generate_with_medswin_internal(
     eos_token_id: int,
     pad_token_id: int,
     prompt_length: int,
-    min_new_tokens: int = 100
+    min_new_tokens: int = 100,
+    streamer: TextIteratorStreamer = None,
+    stopping_criteria: StoppingCriteriaList = None
 ):
     """
-    Internal GPU function that only takes picklable arguments.
-    This function is decorated with @spaces.GPU and creates streamer/stopping criteria internally.
-    
-    Returns: TextIteratorStreamer that can be consumed by the caller
+    Internal generation function that runs directly on GPU.
+    Model is already on GPU via device_map="auto", so no @spaces.GPU decorator needed.
+    This avoids pickling issues with streamer and stopping_criteria.
     """
-    # Get model and tokenizer from global storage (already loaded)
-    medical_model_obj = global_medical_models.get(model_name)
-    medical_tokenizer = global_medical_tokenizers.get(model_name)
-    
-    if medical_model_obj is None or medical_tokenizer is None:
-        raise ValueError(f"Model {model_name} not initialized. Call initialize_medical_model first.")
-    
     # Ensure model is in evaluation mode
     medical_model_obj.eval()
     
@@ -175,37 +170,38 @@ def _generate_with_medswin_internal(
     actual_prompt_length = inputs['input_ids'].shape[1]
     logger.info(f"Tokenized prompt: {actual_prompt_length} tokens on device {device}")
     
-    # Create streamer inside GPU function (can't be pickled, so create here)
-    streamer = TextIteratorStreamer(
-        medical_tokenizer,
-        skip_prompt=True,
-        skip_special_tokens=True,
-        timeout=None
-    )
+    # Use provided streamer and stopping_criteria (created in caller to avoid pickling)
+    if streamer is None:
+        streamer = TextIteratorStreamer(
+            medical_tokenizer,
+            skip_prompt=True,
+            skip_special_tokens=True,
+            timeout=None
+        )
     
-    # Create stopping criteria inside GPU function (can't be pickled)
-    # Use a simple flag-based stopping instead of threading.Event
-    class SimpleStoppingCriteria(StoppingCriteria):
-        def __init__(self, eos_token_id, prompt_length, min_new_tokens=100):
-            super().__init__()
-            self.eos_token_id = eos_token_id
-            self.prompt_length = prompt_length
-            self.min_new_tokens = min_new_tokens
+    if stopping_criteria is None:
+        # Create simple stopping criteria if not provided
+        class SimpleStoppingCriteria(StoppingCriteria):
+            def __init__(self, eos_token_id, prompt_length, min_new_tokens=100):
+                super().__init__()
+                self.eos_token_id = eos_token_id
+                self.prompt_length = prompt_length
+                self.min_new_tokens = min_new_tokens
 
-        def __call__(self, input_ids, scores, **kwargs):
-            current_length = input_ids.shape[1]
-            new_tokens = current_length - self.prompt_length
-            last_token = input_ids[0, -1].item()
-            
-            # Don't stop on EOS if we haven't generated enough new tokens
-            if new_tokens < self.min_new_tokens:
-                return False
-            # Allow EOS after minimum new tokens have been generated
-            return last_token == self.eos_token_id
-    
-    stopping_criteria = StoppingCriteriaList([
-        SimpleStoppingCriteria(eos_token_id, actual_prompt_length, min_new_tokens)
-    ])
+            def __call__(self, input_ids, scores, **kwargs):
+                current_length = input_ids.shape[1]
+                new_tokens = current_length - self.prompt_length
+                last_token = input_ids[0, -1].item()
+                
+                # Don't stop on EOS if we haven't generated enough new tokens
+                if new_tokens < self.min_new_tokens:
+                    return False
+                # Allow EOS after minimum new tokens have been generated
+                return last_token == self.eos_token_id
+        
+        stopping_criteria = StoppingCriteriaList([
+            SimpleStoppingCriteria(eos_token_id, actual_prompt_length, min_new_tokens)
+        ])
     
     # Prepare generation kwargs - following standard MedAlpaca/LLaMA pattern
     # Ensure all parameters are valid and within expected ranges
@@ -235,58 +231,17 @@ def _generate_with_medswin_internal(
         generation_kwargs["pad_token_id"] = pad_token_id
     
     # Run generation on GPU with torch.no_grad() for efficiency
-    # Start generation in a separate thread so we can return the streamer immediately
-    def run_generation():
-        with torch.no_grad():
-            try:
-                logger.debug(f"Starting generation with max_new_tokens={max_new_tokens}, temperature={generation_kwargs['temperature']}, top_p={generation_kwargs['top_p']}, top_k={generation_kwargs['top_k']}")
-                logger.debug(f"EOS token ID: {eos_token_id}, PAD token ID: {pad_token_id}")
-                medical_model_obj.generate(**generation_kwargs)
-            except Exception as e:
-                logger.error(f"Error during generation: {e}")
-                import traceback
-                logger.error(traceback.format_exc())
-                raise
-    
-    # Start generation in background thread
-    gen_thread = threading.Thread(target=run_generation, daemon=True)
-    gen_thread.start()
-    
-    # Return streamer so caller can consume it
-    return streamer
-
-
-@spaces.GPU(max_duration=120)
-def generate_with_medswin_gpu(
-    model_name: str,
-    prompt: str,
-    max_new_tokens: int,
-    temperature: float,
-    top_p: float,
-    top_k: int,
-    penalty: float,
-    eos_token_id: int,
-    pad_token_id: int,
-    prompt_length: int,
-    min_new_tokens: int = 100
-):
-    """
-    GPU-decorated wrapper that only takes picklable arguments.
-    This function is called by generate_with_medswin which handles unpicklable objects.
-    """
-    return _generate_with_medswin_internal(
-        model_name=model_name,
-        prompt=prompt,
-        max_new_tokens=max_new_tokens,
-        temperature=temperature,
-        top_p=top_p,
-        top_k=top_k,
-        penalty=penalty,
-        eos_token_id=eos_token_id,
-        pad_token_id=pad_token_id,
-        prompt_length=prompt_length,
-        min_new_tokens=min_new_tokens
-    )
+    # Model is already on GPU, so this will run on GPU automatically
+    with torch.no_grad():
+        try:
+            logger.debug(f"Starting generation with max_new_tokens={max_new_tokens}, temperature={generation_kwargs['temperature']}, top_p={generation_kwargs['top_p']}, top_k={generation_kwargs['top_k']}")
+            logger.debug(f"EOS token ID: {eos_token_id}, PAD token ID: {pad_token_id}")
+            medical_model_obj.generate(**generation_kwargs)
+        except Exception as e:
+            logger.error(f"Error during generation: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
+            raise
 
 
 def generate_with_medswin(
@@ -305,24 +260,18 @@ def generate_with_medswin(
     stopping_criteria: StoppingCriteriaList
 ):
     """
-    Public API function that maintains backward compatibility.
-    This function is NOT decorated with @spaces.GPU to avoid pickling issues.
-    It calls the GPU-decorated function internally.
+    Public API function for model generation.
     
-    Note: stop_event and the original streamer/stopping_criteria are kept for API compatibility
-    but the actual generation uses new objects created inside the GPU function.
+    This function is NOT decorated with @spaces.GPU because:
+    1. The model is already on GPU via device_map="auto" during initialization
+    2. Generation will automatically run on GPU where the model is located
+    3. This avoids pickling issues with streamer, stop_event, and stopping_criteria
+    
+    The @spaces.GPU decorator is only needed for model loading, which is handled
+    separately in initialize_medical_model (though that also doesn't need it since
+    device_map="auto" handles GPU placement).
     """
-    # Get model name from global storage (find which model this is)
-    model_name = None
-    for name, model in global_medical_models.items():
-        if model is medical_model_obj:
-            model_name = name
-            break
-    
-    if model_name is None:
-        raise ValueError("Model not found in global storage. Ensure model is initialized via initialize_medical_model.")
-    
-    # Calculate prompt length for stopping criteria
+    # Calculate prompt length for stopping criteria (if not already calculated)
     inputs = medical_tokenizer(
         prompt,
         return_tensors="pt",
@@ -332,10 +281,11 @@ def generate_with_medswin(
     )
     prompt_length = inputs['input_ids'].shape[1]
     
-    # Call GPU function with only picklable arguments
-    # The GPU function will create its own streamer and stopping criteria
-    gpu_streamer = generate_with_medswin_gpu(
-        model_name=model_name,
+    # Call internal generation function directly
+    # Model is already on GPU, so generation will happen on GPU automatically
+    _generate_with_medswin_internal(
+        medical_model_obj=medical_model_obj,
+        medical_tokenizer=medical_tokenizer,
         prompt=prompt,
         max_new_tokens=max_new_tokens,
         temperature=temperature,
@@ -345,56 +295,11 @@ def generate_with_medswin(
         eos_token_id=eos_token_id,
         pad_token_id=pad_token_id,
         prompt_length=prompt_length,
-        min_new_tokens=100
+        min_new_tokens=100,
+        streamer=streamer,  # Use the provided streamer (created in caller)
+        stopping_criteria=stopping_criteria  # Use the provided stopping criteria
     )
     
-    # Copy tokens from GPU streamer to the original streamer
-    # TextIteratorStreamer uses a queue internally (usually named 'queue' or '_queue')
-    # We need to read from GPU streamer and write to the original streamer's queue
-    def copy_stream():
-        try:
-            # Find the queue in the original streamer
-            streamer_queue = None
-            if hasattr(streamer, 'queue'):
-                streamer_queue = streamer.queue
-            elif hasattr(streamer, '_queue'):
-                streamer_queue = streamer._queue
-            else:
-                # Try to get queue from tokenizer's queue if available
-                logger.warning("Could not find streamer queue attribute, trying alternative method")
-                # TextIteratorStreamer might store queue differently - check all attributes
-                for attr in dir(streamer):
-                    if 'queue' in attr.lower() and not attr.startswith('__'):
-                        try:
-                            streamer_queue = getattr(streamer, attr)
-                            if hasattr(streamer_queue, 'put'):
-                                break
-                        except:
-                            pass
-            
-            if streamer_queue is None:
-                logger.error("Could not access streamer queue - tokens will be lost!")
-                return
-            
-            # Read tokens from GPU streamer and put them into original streamer's queue
-            for token in gpu_streamer:
-                streamer_queue.put(token)
-            
-            # Signal end of stream (TextIteratorStreamer uses None or StopIteration)
-            try:
-                streamer_queue.put(None)
-            except:
-                pass
-                
-        except Exception as e:
-            logger.error(f"Error copying stream: {e}")
-            import traceback
-            logger.error(traceback.format_exc())
-    
-    # Start copying in background
-    copy_thread = threading.Thread(target=copy_stream, daemon=True)
-    copy_thread.start()
-    
-    # Return immediately - caller will consume from original streamer
+    # Function returns immediately - generation happens in background via streamer
     return
 
