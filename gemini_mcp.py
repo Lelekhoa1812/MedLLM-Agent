@@ -24,9 +24,9 @@ except ImportError:
 
 # Gemini imports
 try:
-    import google.generativeai as genai
+    from google import genai
 except ImportError:
-    print("Error: google-generativeai not installed. Install with: pip install google-generativeai", file=sys.stderr)
+    print("Error: google-genai not installed. Install with: pip install google-genai", file=sys.stderr)
     sys.exit(1)
 
 # Configure logging
