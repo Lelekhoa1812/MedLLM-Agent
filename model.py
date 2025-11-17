@@ -83,7 +83,6 @@ def initialize_medical_model(model_name: str):
     return global_medical_models[model_name], global_medical_tokenizers[model_name]
 
 
-@spaces.GPU(max_duration=120)
 def get_llm_for_rag(temperature=0.7, max_new_tokens=256, top_p=0.95, top_k=50):
     """Get LLM for RAG indexing (uses medical model) - GPU only"""
     # Use medical model for RAG indexing instead of translation model
@@ -103,12 +102,11 @@ def get_llm_for_rag(temperature=0.7, max_new_tokens=256, top_p=0.95, top_k=50):
     )
 
 
-@spaces.GPU(max_duration=120)
 def get_embedding_model():
     """Get embedding model for RAG - GPU only"""
     return HuggingFaceEmbedding(model_name=EMBEDDING_MODEL, token=HF_TOKEN)
 
-
+@spaces.GPU(max_duration=120)
 def generate_with_medswin(
     medical_model_obj,
     medical_tokenizer,
