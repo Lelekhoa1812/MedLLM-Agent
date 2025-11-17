@@ -1866,7 +1866,7 @@ def stream_chat(
     
     if needs_translation:
         logger.info(f"[GEMINI SUPERVISOR] Detected non-English language: {original_lang}, translating...")
-            message = translate_text(message, target_lang="en", source_lang=original_lang)
+        message = translate_text(message, target_lang="en", source_lang=original_lang)
         logger.info(f"[GEMINI SUPERVISOR] Translated query: {message[:100]}...")
     
     # Determine final modes (respect user settings and availability)
@@ -1973,7 +1973,7 @@ def stream_chat(
     for idx, sub_topic in enumerate(breakdown.get("sub_topics", []), 1):
         if elapsed() >= hard_timeout - 5:
             logger.warning(f"[MEDSWIN] Time limit approaching, stopping at task {idx}")
-                break
+            break
         
         task_instruction = sub_topic.get("instruction", "")
         topic_name = sub_topic.get("topic", f"Topic {idx}")
@@ -1995,10 +1995,10 @@ def stream_chat(
                 task_instruction=task_instruction,
                 context=task_context if task_context else "",
                 system_prompt_base=base_system_prompt,
-        temperature=temperature,
+                temperature=temperature,
                 max_new_tokens=min(max_new_tokens, 800),  # Limit per task
-        top_p=top_p,
-        top_k=top_k,
+                top_p=top_p,
+                top_k=top_k,
                 penalty=penalty
             )
             
@@ -2010,7 +2010,7 @@ def stream_chat(
             # Stream partial answer as we complete each task
             partial_final = "\n\n".join(medswin_answers)
             updated_history[-1]["content"] = partial_final
-    yield updated_history
+            yield updated_history
     
         except Exception as e:
             logger.error(f"[MEDSWIN] Task {idx} failed: {e}")
@@ -2036,7 +2036,7 @@ def stream_chat(
         final_answer = '\n'.join(cleaned_lines)
     
     # ===== STEP 6: Finalize answer (translate, add citations, format) =====
-        # Translate back if needed
+    # Translate back if needed
     if needs_translation and final_answer:
         logger.info(f"[GEMINI SUPERVISOR] Translating response back to {original_lang}...")
         final_answer = translate_text(final_answer, target_lang=original_lang, source_lang="en")
@@ -2121,8 +2121,8 @@ def create_demo():
                         type="filepath",
                         label="",
                         show_label=False,
-                    container=False,
-                    scale=1
+                        container=False,
+                        scale=1
                     )
                     submit_button = gr.Button("➤", elem_classes="submit-btn", scale=1)
                 
@@ -2130,10 +2130,10 @@ def create_demo():
                 recording_timer = gr.Textbox(
                     value="",
                     label="",
-                        show_label=False,
+                    show_label=False,
                     interactive=False,
                     visible=False,
-                        container=False,
+                    container=False,
                     elem_classes="recording-timer"
                     )
                 
