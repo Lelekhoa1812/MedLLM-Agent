@@ -284,12 +284,17 @@ async def main():
         async with stdio_server() as streams:
             # Restore logging after initialization
             logging.getLogger("root").setLevel(original_root_level)
-            logger.info("✅ MCP server initialized and ready")
+            logger.info("✅ MCP server stdio streams ready, starting server...")
+            
+            # Run the server - this handles initialization automatically
+            # The create_initialization_options() provides server capabilities
+            init_options = app.create_initialization_options()
+            logger.info(f"MCP server initialization options: {init_options}")
             
             await app.run(
                 streams[0],  # read_stream
                 streams[1],  # write_stream
-                app.create_initialization_options()
+                init_options
             )
     except Exception as e:
         logging.getLogger("root").setLevel(original_root_level)

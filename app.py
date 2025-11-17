@@ -288,14 +288,16 @@ async def get_mcp_session():
             logger.warning(f"MCP session initialization had an issue (may be expected): {e}")
             # Continue anyway - the session might still work
         
-        # Wait a bit more for the server to be fully ready after initialization
-        await asyncio.sleep(1.5)
+        # Wait longer for the server to be fully ready after initialization
+        # The server needs time to process the initialization and be ready for requests
+        await asyncio.sleep(2.5)
         
         # Verify the session works by listing tools with retries
         # This confirms the server is ready to handle requests
-        max_init_retries = 10
+        max_init_retries = 15
         tools_listed = False
         tools = None
+        last_error = None
         for init_attempt in range(max_init_retries):
             try:
                 tools = await session.list_tools()
@@ -304,20 +306,34 @@ async def get_mcp_session():
                     tools_listed = True
                     break
             except Exception as e:
+                last_error = e
                 error_str = str(e).lower()
+                error_msg = str(e)
+                
+                # Log the actual error for debugging
+                if init_attempt == 0:
+                    logger.debug(f"First list_tools attempt failed: {error_msg}")
+                
                 # Ignore initialization-related errors during the handshake phase
-                if "initialization" in error_str or "before initialization" in error_str:
+                if "initialization" in error_str or "before initialization" in error_str or "not initialized" in error_str:
                     if init_attempt < max_init_retries - 1:
                         wait_time = 0.5 * (init_attempt + 1)  # Progressive wait: 0.5s, 1s, 1.5s...
                         logger.debug(f"Server still initializing (attempt {init_attempt + 1}/{max_init_retries}), waiting {wait_time}s...")
                         await asyncio.sleep(wait_time)
                         continue
+                elif "invalid request" in error_str or "invalid request parameters" in error_str:
+                    # This might be a timing issue - wait and retry
+                    if init_attempt < max_init_retries - 1:
+                        wait_time = 0.8 * (init_attempt + 1)  # Longer wait for invalid request errors
+                        logger.debug(f"Invalid request error (attempt {init_attempt + 1}/{max_init_retries}), waiting {wait_time}s...")
+                        await asyncio.sleep(wait_time)
+                        continue
                 elif init_attempt < max_init_retries - 1:
                     wait_time = 0.5 * (init_attempt + 1)
-                    logger.debug(f"Tool listing attempt {init_attempt + 1}/{max_init_retries} failed: {e}, waiting {wait_time}s...")
+                    logger.debug(f"Tool listing attempt {init_attempt + 1}/{max_init_retries} failed: {error_msg}, waiting {wait_time}s...")
                     await asyncio.sleep(wait_time)
                 else:
-                    logger.error(f"❌ Could not list tools after {max_init_retries} attempts: {e}")
+                    logger.error(f"❌ Could not list tools after {max_init_retries} attempts. Last error: {error_msg}")
                     # Don't continue - if we can't list tools, the session is not usable
                     try:
                         await session.__aexit__(None, None, None)
@@ -330,7 +346,8 @@ async def get_mcp_session():
                     return None
         
         if not tools_listed:
-            logger.error("MCP server failed to initialize - tools could not be listed")
+            error_msg = str(last_error) if last_error else "Unknown error"
+            logger.error(f"MCP server failed to initialize - tools could not be listed. Last error: {error_msg}")
             try:
                 await session.__aexit__(None, None, None)
             except:
