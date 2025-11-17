@@ -1632,6 +1632,7 @@ def stream_chat(
     use_rag: bool,
     medical_model: str,
     use_web_search: bool,
+    disable_agentic_reasoning: bool,
     request: gr.Request
 ):
     if not request:
@@ -1642,36 +1643,57 @@ def stream_chat(
     index_dir = f"./{user_id}_index"
     has_rag_index = os.path.exists(index_dir)
     
-    # ===== AUTONOMOUS REASONING =====
-    logger.info("🤔 Starting autonomous reasoning...")
-    reasoning = autonomous_reasoning(message, history)
-    
-    # ===== PLANNING =====
-    logger.info("📋 Creating execution plan...")
-    plan = create_execution_plan(reasoning, message, has_rag_index)
-    
-    # ===== AUTONOMOUS EXECUTION STRATEGY =====
-    logger.info("🎯 Determining execution strategy...")
-    execution_strategy = autonomous_execution_strategy(reasoning, plan, use_rag, use_web_search, has_rag_index)
-    
-    # Use autonomous strategy decisions (respect user's RAG setting)
-    final_use_rag = execution_strategy["use_rag"] and has_rag_index  # Only use RAG if enabled AND documents exist
-    final_use_web_search = execution_strategy["use_web_search"]
-    
-    # Show reasoning override message if applicable
-    reasoning_note = ""
-    if execution_strategy["reasoning_override"]:
-        reasoning_note = f"\n\n💡 *Autonomous Reasoning: {execution_strategy['rationale']}*"
-    
-    # Detect language and translate if needed (Step 1 of plan)
-    original_lang = detect_language(message)
-    original_message = message
-    needs_translation = original_lang != "en"
-    
-    if needs_translation:
-        logger.info(f"Detected non-English language: {original_lang}, translating to English...")
-        message = translate_text(message, target_lang="en", source_lang=original_lang)
-        logger.info(f"Translated query: {message}")
+    # If agentic reasoning is disabled, use base MedSwin model only
+    if disable_agentic_reasoning:
+        logger.info("🚫 Agentic reasoning disabled - using base MedSwin model only")
+        # Skip all MCP functionality: reasoning, translation, web search, summarization
+        original_message = message
+        original_lang = "en"  # Assume English, no translation
+        needs_translation = False
+        final_use_rag = use_rag and has_rag_index  # Still allow RAG if user wants it
+        final_use_web_search = False  # Disable web search when agentic reasoning is off
+        reasoning_note = ""
+        
+        # Simple reasoning structure for base model
+        reasoning = {
+            "query_type": "general_info",
+            "complexity": "simple",
+            "information_needs": ["direct_answer"],
+            "requires_rag": final_use_rag,
+            "requires_web_search": False,
+            "sub_questions": [message]
+        }
+    else:
+        # ===== AUTONOMOUS REASONING =====
+        logger.info("🤔 Starting autonomous reasoning...")
+        reasoning = autonomous_reasoning(message, history)
+        
+        # ===== PLANNING =====
+        logger.info("📋 Creating execution plan...")
+        plan = create_execution_plan(reasoning, message, has_rag_index)
+        
+        # ===== AUTONOMOUS EXECUTION STRATEGY =====
+        logger.info("🎯 Determining execution strategy...")
+        execution_strategy = autonomous_execution_strategy(reasoning, plan, use_rag, use_web_search, has_rag_index)
+        
+        # Use autonomous strategy decisions (respect user's RAG setting)
+        final_use_rag = execution_strategy["use_rag"] and has_rag_index  # Only use RAG if enabled AND documents exist
+        final_use_web_search = execution_strategy["use_web_search"]
+        
+        # Show reasoning override message if applicable
+        reasoning_note = ""
+        if execution_strategy["reasoning_override"]:
+            reasoning_note = f"\n\n💡 *Autonomous Reasoning: {execution_strategy['rationale']}*"
+        
+        # Detect language and translate if needed (Step 1 of plan)
+        original_lang = detect_language(message)
+        original_message = message
+        needs_translation = original_lang != "en"
+        
+        if needs_translation:
+            logger.info(f"Detected non-English language: {original_lang}, translating to English...")
+            message = translate_text(message, target_lang="en", source_lang=original_lang)
+            logger.info(f"Translated query: {message}")
     
     # Initialize medical model
     medical_model_obj, medical_tokenizer = initialize_medical_model(medical_model)
@@ -1682,8 +1704,8 @@ def stream_chat(
     else:
         base_system_prompt = "As a medical specialist, provide short and concise clinical answers. Be brief and avoid lengthy explanations. Focus on key medical facts only."
     
-    # Add reasoning context to system prompt for complex queries
-    if reasoning["complexity"] in ["complex", "multi_faceted"]:
+    # Add reasoning context to system prompt for complex queries (only when agentic reasoning is enabled)
+    if not disable_agentic_reasoning and reasoning["complexity"] in ["complex", "multi_faceted"]:
         base_system_prompt += f"\n\nQuery Analysis: This is a {reasoning['complexity']} {reasoning['query_type']} query. Address all sub-questions: {', '.join(reasoning.get('sub_questions', [])[:3])}"
     
     # ===== EXECUTION: RAG Retrieval (Step 2) =====
@@ -1873,7 +1895,8 @@ def stream_chat(
             yield updated_history
         
         # ===== SELF-REFLECTION (Step 6) =====
-        if reasoning["complexity"] in ["complex", "multi_faceted"]:
+        # Skip self-reflection when agentic reasoning is disabled
+        if not disable_agentic_reasoning and reasoning["complexity"] in ["complex", "multi_faceted"]:
             logger.info("🔍 Performing self-reflection on answer quality...")
             reflection = self_reflection(partial_response, message, reasoning)
             
@@ -1890,8 +1913,8 @@ def stream_chat(
             partial_response = reasoning_note + "\n\n" + partial_response
             updated_history[-1]["content"] = partial_response
         
-        # Translate back if needed
-        if needs_translation and partial_response:
+        # Translate back if needed (only when agentic reasoning is enabled)
+        if not disable_agentic_reasoning and needs_translation and partial_response:
             logger.info(f"Translating response back to {original_lang}...")
             translated_response = translate_text(partial_response, target_lang=original_lang, source_lang="en")
             partial_response = translated_response
@@ -2065,6 +2088,12 @@ def create_demo():
                 
                 with gr.Accordion("⚙️ Advanced Settings", open=False):
                     with gr.Row():
+                        disable_agentic_reasoning = gr.Checkbox(
+                            value=False,
+                            label="Disable Agentic Reasoning",
+                            info="Use base MedSwin model only, no MCP tools (Gemini, web search, reasoning)"
+                        )
+                    with gr.Row():
                         use_rag = gr.Checkbox(
                             value=False,
                             label="Enable Document RAG",
@@ -2158,7 +2187,8 @@ def create_demo():
                         merge_threshold,
                         use_rag,
                         medical_model,
-                        use_web_search
+                        use_web_search,
+                        disable_agentic_reasoning
                     ],
                     outputs=chatbot
                 )
@@ -2178,7 +2208,8 @@ def create_demo():
                         merge_threshold,
                         use_rag,
                         medical_model,
-                        use_web_search
+                        use_web_search,
+                        disable_agentic_reasoning
                     ],
                     outputs=chatbot
                 )
