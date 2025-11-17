@@ -18,6 +18,7 @@ from pathlib import Path
 try:
     from mcp.server import Server
     from mcp.types import Tool, TextContent, ImageContent, EmbeddedResource
+    from mcp.server.models import InitializationOptions
 except ImportError:
     print("Error: MCP SDK not installed. Install with: pip install mcp", file=sys.stderr)
     sys.exit(1)
@@ -289,12 +290,45 @@ async def main():
             logging.getLogger("root").setLevel(original_root_level)
             logger.info("✅ MCP server stdio streams ready, starting server...")
             
-            # Run the server - this handles initialization automatically
-            # The app.run() method handles the initialization handshake internally
-            # We don't need to pass initialization options - the SDK handles it
+            # Create initialization options with server capabilities
+            # The Server class should provide its capabilities automatically
+            try:
+                # Try to get capabilities from the server using get_capabilities method
+                if hasattr(app, 'get_capabilities'):
+                    # Try with NotificationOptions if available
+                    try:
+                        from mcp.server.lowlevel.server import NotificationOptions
+                        server_capabilities = app.get_capabilities(
+                            notification_options=NotificationOptions(),
+                            experimental_capabilities={}
+                        )
+                    except ImportError:
+                        # Fallback: try without NotificationOptions
+                        server_capabilities = app.get_capabilities()
+                else:
+                    # Fallback: create basic capabilities structure
+                    server_capabilities = {
+                        "tools": {}
+                    }
+            except Exception as e:
+                logger.warning(f"Could not get server capabilities: {e}, using defaults")
+                # Fallback: create basic capabilities
+                server_capabilities = {
+                    "tools": {}
+                }
+            
+            # Create initialization options
+            init_options = InitializationOptions(
+                server_name="gemini-mcp-server",
+                server_version="1.0.0",
+                capabilities=server_capabilities
+            )
+            
+            # Run the server with initialization options
             await app.run(
-                streams[0],  # read_stream
-                streams[1]   # write_stream
+                read_stream=streams[0],
+                write_stream=streams[1],
+                initialization_options=init_options
             )
     except Exception as e:
         logging.getLogger("root").setLevel(original_root_level)
