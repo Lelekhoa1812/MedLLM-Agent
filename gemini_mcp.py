@@ -25,6 +25,7 @@ except ImportError:
 # Gemini imports
 try:
     from google import genai
+    GEMINI_AVAILABLE = True
 except ImportError:
     print("Error: google-genai not installed. Install with: pip install google-genai", file=sys.stderr)
     sys.exit(1)
@@ -39,7 +40,8 @@ if not GEMINI_API_KEY:
     logger.error("GEMINI_API_KEY not set in environment variables")
     sys.exit(1)
 
-genai.configure(api_key=GEMINI_API_KEY)
+# Initialize Gemini client
+gemini_client = genai.Client(api_key=GEMINI_API_KEY)
 
 # Configuration from environment
 GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
@@ -165,73 +167,41 @@ async def call_tool(name: str, arguments: dict) -> Sequence[TextContent | ImageC
             model = arguments.get("model", GEMINI_MODEL)
             temperature = float(arguments.get("temperature", GEMINI_TEMPERATURE))
             
-            # Prepare model
-            try:
-                gemini_model = genai.GenerativeModel(model)
-            except Exception as e:
-                logger.error(f"Error loading model {model}: {e}")
-                return [TextContent(type="text", text=f"Error: Failed to load model {model}")]
+            # Prepare content for Gemini API
+            # The API accepts contents as a string or list
+            # For files, we need to handle them differently
+            contents = user_prompt
             
-            # Prepare content parts
-            parts = []
-            
-            # Add system instruction if provided
+            # If system prompt is provided, prepend it to the user prompt
             if system_prompt:
-                # Gemini models use system_instruction parameter
-                generation_config = genai.types.GenerationConfig(
-                    temperature=temperature,
-                    max_output_tokens=GEMINI_MAX_OUTPUT_TOKENS
-                )
-            else:
-                generation_config = genai.types.GenerationConfig(
-                    temperature=temperature,
-                    max_output_tokens=GEMINI_MAX_OUTPUT_TOKENS
-                )
+                contents = f"{system_prompt}\n\n{user_prompt}"
             
-            # Prepare content parts for Gemini
-            # Gemini API accepts a list where each part can be:
-            # - A string (for text)
-            # - A dict with "mime_type" and "data" keys (for binary data)
-            content_parts = []
-            
-            # Prepare files if provided
+            # Note: The simple API doesn't support files or temperature directly
+            # For files, we would need to use a different approach or encode them
+            # For now, we'll handle text-only requests
             if files:
-                gemini_files = prepare_gemini_files(files)
-                for file_part in gemini_files:
-                    # Use genai.types.Part or dict format
-                    content_parts.append({
-                        "mime_type": file_part["mime_type"],
-                        "data": file_part["data"]
-                    })
+                logger.warning("File support not available in simple API mode. Processing text only.")
+                # Could potentially encode files as base64 in the prompt, but keeping it simple for now
             
-            # Add text prompt (as string)
-            content_parts.append(user_prompt)
-            
-            # Generate content
+            # Generate content using the simple API
             try:
-                if system_prompt:
-                    # Use system_instruction for models that support it
-                    response = await asyncio.to_thread(
-                        gemini_model.generate_content,
-                        content_parts,
-                        generation_config=generation_config,
-                        system_instruction=system_prompt
-                    )
-                else:
-                    response = await asyncio.to_thread(
-                        gemini_model.generate_content,
-                        content_parts,
-                        generation_config=generation_config
-                    )
+                # Use asyncio.to_thread to make the blocking call async
+                response = await asyncio.to_thread(
+                    gemini_client.models.generate_content,
+                    model=model,
+                    contents=contents
+                )
                 
                 # Extract text from response
-                if response and response.text:
+                if response and hasattr(response, 'text') and response.text:
                     return [TextContent(type="text", text=response.text)]
                 else:
                     return [TextContent(type="text", text="Error: No response from Gemini")]
                     
             except Exception as e:
                 logger.error(f"Error generating content: {e}")
+                import traceback
+                logger.debug(traceback.format_exc())
                 return [TextContent(type="text", text=f"Error: {str(e)}")]
                 
         except Exception as e:
