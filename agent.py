@@ -18,6 +18,7 @@ from pathlib import Path
 try:
     from mcp.server import Server
     from mcp.types import Tool, TextContent, ImageContent, EmbeddedResource
+    from mcp.server.models import InitializationOptions
 except ImportError:
     print("Error: MCP SDK not installed. Install with: pip install mcp", file=sys.stderr)
     sys.exit(1)
@@ -281,15 +282,29 @@ async def main():
     
     try:
         async with stdio_server() as streams:
-            # The Server class automatically handles initialization and provides capabilities
-            # based on the registered @app.list_tools() and @app.call_tool() handlers
-            # No need to manually create InitializationOptions - the server handles this
+            # Prepare server capabilities for initialization
+            try:
+                if hasattr(app, "get_capabilities"):
+                    server_capabilities = app.get_capabilities()
+                else:
+                    server_capabilities = {}
+            except Exception as cap_error:
+                logger.warning(f"Failed to gather server capabilities: {cap_error}")
+                server_capabilities = {}
+
+            init_options = InitializationOptions(
+                server_name="gemini-mcp-server",
+                server_version="1.0.0",
+                capabilities=server_capabilities,
+            )
+
             logger.info("MCP server ready")
             try:
                 # Run the server - it will automatically handle the initialization handshake
                 await app.run(
                     read_stream=streams[0],
-                    write_stream=streams[1]
+                    write_stream=streams[1],
+                    initialization_options=init_options,
                 )
             except Exception as run_error:
                 logger.error(f"Error in app.run(): {run_error}")
