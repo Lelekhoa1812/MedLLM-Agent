@@ -215,9 +215,6 @@ async def call_tool(name: str, arguments: dict) -> Sequence[TextContent | ImageC
             
             # Generate content using Gemini API
             try:
-                # Get the model instance (requires keyword argument)
-                gemini_model = gemini_client.models.get(model=model)
-                
                 # Prepare generation config
                 generation_config = {
                     "temperature": temperature,
@@ -227,9 +224,10 @@ async def call_tool(name: str, arguments: dict) -> Sequence[TextContent | ImageC
                 # Use asyncio.to_thread to make the blocking call async
                 # The API accepts contents as a list and config as a separate parameter
                 def generate_sync():
-                    return gemini_model.generate_content(
+                    return gemini_client.models.generate_content(
+                        model=model,
                         contents=gemini_contents,
-                        config=generation_config
+                        config=generation_config,
                     )
                 
                 response = await asyncio.to_thread(generate_sync)
