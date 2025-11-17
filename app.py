@@ -286,30 +286,42 @@ async def get_mcp_session():
         logger.info("⏳ Waiting for MCP server process to start...")
         await asyncio.sleep(2.0)  # Wait for server process startup
         
-        # Create ClientSession from the streams with client info
+        # Create ClientSession from the streams
         # ClientSession handles initialization automatically when used as context manager
+        # Use the session as a context manager to ensure proper initialization
+        logger.info("🔄 Creating MCP client session...")
         try:
             from mcp.types import ClientInfo
-            client_info = ClientInfo(
-                name="medllm-agent",
-                version="1.0.0"
-            )
-            session = ClientSession(read, write, client_info=client_info)
-        except (ImportError, TypeError):
-            # Fallback if ClientInfo is not available or not needed
+            try:
+                client_info = ClientInfo(
+                    name="medllm-agent",
+                    version="1.0.0"
+                )
+                session = ClientSession(read, write, client_info=client_info)
+            except (TypeError, ValueError):
+                # Fallback if ClientInfo parameters are incorrect
+                session = ClientSession(read, write)
+        except (ImportError, AttributeError):
+            # Fallback if ClientInfo is not available
             session = ClientSession(read, write)
         
+        # Initialize the session using context manager pattern
+        # This properly handles the initialization handshake
+        logger.info("🔄 Initializing MCP session...")
         try:
-            # Initialize the session (this sends initialize request and waits for response)
-            # The MCP SDK ClientSession.__aenter__() handles the full initialization handshake
-            logger.info("🔄 Initializing MCP session...")
+            # Enter the session context - this triggers initialization
             await session.__aenter__()
             logger.info("✅ MCP session initialized, verifying tools...")
         except Exception as e:
-            logger.warning(f"MCP session initialization had an issue: {e}")
+            logger.error(f"❌ MCP session initialization failed: {e}")
             import traceback
             logger.debug(traceback.format_exc())
-            # Try to continue - the session might still work
+            # Clean up and return None
+            try:
+                await stdio_ctx.__aexit__(None, None, None)
+            except:
+                pass
+            return None
         
         # Wait for the server to be fully ready after initialization
         await asyncio.sleep(1.0)  # Wait after initialization
@@ -409,7 +421,15 @@ async def get_mcp_session():
         return None
 
 async def call_agent(user_prompt: str, system_prompt: str = None, files: list = None, model: str = None, temperature: float = 0.2) -> str:
-    """Call Gemini MCP generate_content tool"""
+    """
+    Call Gemini MCP generate_content tool via MCP protocol.
+    
+    This function uses the MCP (Model Context Protocol) to call Gemini AI,
+    NOT direct API calls. It connects to the bundled agent.py MCP server
+    which provides the generate_content tool.
+    
+    Used for: translation, summarization, document parsing, transcription, reasoning
+    """
     if not MCP_AVAILABLE:
         logger.warning("MCP not available for Gemini call")
         return ""
@@ -682,8 +702,17 @@ def generate_speech(text: str):
         return None
 
 def format_prompt_manually(messages: list, tokenizer) -> str:
-    """Manually format prompt for MedSwin/MedAlpaca-based models without chat template"""
-    # Combine system and user messages into a single instruction
+    """Manually format prompt for MedSwin/MedAlpaca-based models without chat template
+    
+    MedSwin is finetuned from MedAlpaca-7B, which uses the Alpaca instruction format:
+    ### Instruction:
+    {instruction}
+    ### Input:
+    {input}  (optional, can be empty)
+    ### Response:
+    {response}
+    """
+    # Combine system and user messages into instruction and input
     system_content = ""
     user_content = ""
     
@@ -700,21 +729,23 @@ def format_prompt_manually(messages: list, tokenizer) -> str:
             pass
     
     # Format for MedSwin/MedAlpaca-based models
-    # MedSwin is finetuned from MedAlpaca-7B, which uses a specific instruction format
-    # Standard MedAlpaca format:
-    # ### Instruction:
-    # {instruction}
-    # ### Input:
-    # {input}
-    # ### Response:
-    
-    if system_content:
-        # Combine system and user content as instruction
-        instruction = f"{system_content}\n\n{user_content}" if user_content else system_content
-        prompt = f"### Instruction:\n{instruction}\n\n### Response:\n"
+    # MedAlpaca format requires Instruction, Input (optional), and Response sections
+    if system_content and user_content:
+        # Both system and user content: system is instruction, user is input
+        instruction = system_content.strip()
+        input_text = user_content.strip()
+        prompt = f"### Instruction:\n{instruction}\n\n### Input:\n{input_text}\n\n### Response:\n"
+    elif system_content:
+        # Only system content: use as instruction, empty input
+        instruction = system_content.strip()
+        prompt = f"### Instruction:\n{instruction}\n\n### Input:\n\n### Response:\n"
+    elif user_content:
+        # Only user content: use as instruction, empty input
+        instruction = user_content.strip()
+        prompt = f"### Instruction:\n{instruction}\n\n### Input:\n\n### Response:\n"
     else:
-        # If no system prompt, use user content as instruction
-        prompt = f"### Instruction:\n{user_content}\n\n### Response:\n"
+        # Fallback: empty prompt
+        prompt = "### Instruction:\n\n### Input:\n\n### Response:\n"
     
     return prompt
 
@@ -795,7 +826,12 @@ def translate_text(text: str, target_lang: str = "en", source_lang: str = None) 
     return text
 
 async def search_web_mcp_tool(query: str, max_results: int = 5) -> list:
-    """Search web using MCP web search tool (e.g., DuckDuckGo MCP server)"""
+    """
+    Search web using MCP web search tool (e.g., DuckDuckGo MCP server).
+    
+    This function uses MCP tools for web search, NOT direct API calls.
+    It looks for MCP tools with names containing "search", "duckduckgo", "ddg", or "web".
+    """
     if not MCP_AVAILABLE:
         return []
     
@@ -1670,10 +1706,12 @@ def stream_chat(
     web_sources = []
     web_urls = []  # Store URLs for citations
     if final_use_web_search:
-        logger.info("🌐 Performing web search (will use Gemini MCP for summarization)...")
+        logger.info("🌐 Performing web search (using MCP tools, with Gemini MCP for summarization)...")
+        # search_web() tries MCP web search tool first, then falls back to direct API
         web_results = search_web(message, max_results=5)
         if web_results:
             logger.info(f"📊 Found {len(web_results)} web search results, now summarizing with Gemini MCP...")
+            # summarize_web_content() uses Gemini MCP via call_agent()
             web_summary = summarize_web_content(web_results, message)
             if web_summary and len(web_summary) > 50:  # Check if we got a real summary
                 logger.info(f"✅ [MCP] Gemini MCP summarization successful ({len(web_summary)} chars)")

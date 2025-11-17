@@ -46,9 +46,31 @@ def initialize_medical_model(model_name: str):
         tokenizer = AutoTokenizer.from_pretrained(model_path, token=HF_TOKEN)
         
         # Fix tokenizer configuration for MedSwin/MedAlpaca-based models
+        # MedAlpaca-7B is based on LLaMA, which uses specific special tokens
         # These models need proper pad_token and eos_token configuration
+        
+        # MedAlpaca/LLaMA models typically use </s> as EOS token
+        # Ensure eos_token is set first (before pad_token)
+        if tokenizer.eos_token is None:
+            # Try to set EOS token - LLaMA-based models use </s>
+            if hasattr(tokenizer, 'eos_token_id') and tokenizer.eos_token_id is not None:
+                # If eos_token_id exists, get the token string
+                try:
+                    tokenizer.eos_token = tokenizer.decode([tokenizer.eos_token_id])
+                except:
+                    tokenizer.eos_token = "</s>"
+            else:
+                tokenizer.eos_token = "</s>"
+                # Try to get the token ID
+                try:
+                    tokenizer.eos_token_id = tokenizer.convert_tokens_to_ids("</s>")
+                except:
+                    # If </s> doesn't exist, use the last token ID (common in LLaMA)
+                    tokenizer.eos_token_id = tokenizer.vocab_size - 1
+        
+        # Set pad_token - MedAlpaca models typically use EOS as PAD
         if tokenizer.pad_token is None:
-            # Use eos_token as pad_token if pad_token is not set
+            # Use eos_token as pad_token (common in LLaMA-based models)
             if tokenizer.eos_token is not None:
                 tokenizer.pad_token = tokenizer.eos_token
                 tokenizer.pad_token_id = tokenizer.eos_token_id
@@ -56,11 +78,6 @@ def initialize_medical_model(model_name: str):
                 # Fallback: add a pad token
                 tokenizer.add_special_tokens({'pad_token': '[PAD]'})
                 tokenizer.pad_token_id = tokenizer.convert_tokens_to_ids('[PAD]')
-        
-        # Ensure eos_token is set
-        if tokenizer.eos_token is None:
-            tokenizer.eos_token = "</s>"
-            tokenizer.eos_token_id = tokenizer.convert_tokens_to_ids("</s>")
         
         model = AutoModelForCausalLM.from_pretrained(
             model_path,
