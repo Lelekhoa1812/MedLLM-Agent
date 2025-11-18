@@ -2,7 +2,7 @@
 import asyncio
 from langdetect import detect, LangDetectException
 from logger import logger
-from mcp import MCP_AVAILABLE, call_agent
+from client import MCP_AVAILABLE, call_agent
 from config import GEMINI_MODEL_LITE
 
 try:

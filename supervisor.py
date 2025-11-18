@@ -4,7 +4,7 @@ import asyncio
 import torch
 import spaces
 from logger import logger
-from mcp import MCP_AVAILABLE, call_agent
+from client import MCP_AVAILABLE, call_agent
 from config import GEMINI_MODEL, GEMINI_MODEL_LITE
 from utils import format_prompt_manually
 
@@ -206,7 +206,7 @@ Keep contexts brief and factual. Avoid redundancy."""
 def gemini_supervisor_breakdown(query: str, use_rag: bool, use_web_search: bool, time_elapsed: float, max_duration: int = 120) -> dict:
     """Wrapper to obtain supervisor breakdown synchronously"""
     if not MCP_AVAILABLE:
-        logger.warning("[GEMINI SUPERVISOR] MCP unavailable, using fallback breakdown")
+        logger.warning("[GEMINI SUPERVISOR] MCP SDK unavailable, using fallback breakdown")
         return {
             "sub_topics": [
                 {"id": 1, "topic": "Core Question", "instruction": "Address the main medical question", "expected_tokens": 200, "priority": "high", "approach": "direct answer"},
@@ -220,16 +220,22 @@ def gemini_supervisor_breakdown(query: str, use_rag: bool, use_web_search: bool,
         loop = asyncio.get_event_loop()
         if loop.is_running():
             if nest_asyncio:
-                return nest_asyncio.run(
-                    gemini_supervisor_breakdown_async(query, use_rag, use_web_search, time_elapsed, max_duration)
-                )
+                try:
+                    return nest_asyncio.run(
+                        gemini_supervisor_breakdown_async(query, use_rag, use_web_search, time_elapsed, max_duration)
+                    )
+                except Exception as e:
+                    logger.error(f"[GEMINI SUPERVISOR] Async breakdown failed: {e}")
+                    raise
             else:
                 logger.error("[GEMINI SUPERVISOR] Nested breakdown execution failed: nest_asyncio not available")
+                raise RuntimeError("nest_asyncio not available")
         return loop.run_until_complete(
             gemini_supervisor_breakdown_async(query, use_rag, use_web_search, time_elapsed, max_duration)
         )
     except Exception as exc:
-        logger.error(f"[GEMINI SUPERVISOR] Breakdown request failed: {exc}")
+        logger.error(f"[GEMINI SUPERVISOR] Breakdown request failed: {type(exc).__name__}: {exc}")
+        logger.warning("[GEMINI SUPERVISOR] Falling back to default breakdown")
         return {
             "sub_topics": [
                 {"id": 1, "topic": "Core Question", "instruction": "Address the main medical question", "expected_tokens": 200, "priority": "high", "approach": "direct answer"},

@@ -4,7 +4,7 @@ import asyncio
 import tempfile
 import soundfile as sf
 from logger import logger
-from mcp import MCP_AVAILABLE, call_agent, get_mcp_session, get_cached_mcp_tools
+from client import MCP_AVAILABLE, call_agent, get_mcp_session, get_cached_mcp_tools
 import config
 from models import TTS_AVAILABLE, initialize_tts_model
 

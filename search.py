@@ -3,7 +3,7 @@ import json
 import asyncio
 import concurrent.futures
 from logger import logger
-from mcp import MCP_AVAILABLE, get_mcp_session, get_cached_mcp_tools, call_agent
+from client import MCP_AVAILABLE, get_mcp_session, get_cached_mcp_tools, call_agent
 from config import GEMINI_MODEL
 
 try:

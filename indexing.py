@@ -21,7 +21,7 @@ from llama_index.core.node_parser import (
 from llama_index.core.storage.docstore import SimpleDocumentStore
 from tqdm import tqdm
 from logger import logger
-from mcp import MCP_AVAILABLE, call_agent
+from client import MCP_AVAILABLE, call_agent
 import config
 from models import get_llm_for_rag, get_or_create_embed_model
 
