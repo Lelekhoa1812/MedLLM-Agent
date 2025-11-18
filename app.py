@@ -37,6 +37,42 @@ os.environ["TOKENIZERS_PARALLELISM"] = "false"
 # Set logging to INFO level for cleaner output
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
+
+# Custom logger handler to capture agentic thoughts
+class ThoughtCaptureHandler(logging.Handler):
+    """Custom handler to capture internal thoughts from MedSwin and supervisor"""
+    def __init__(self):
+        super().__init__()
+        self.thoughts = []
+        self.lock = threading.Lock()
+    
+    def emit(self, record):
+        """Capture log messages that contain agentic thoughts"""
+        try:
+            msg = self.format(record)
+            # Only capture messages from GEMINI SUPERVISOR or MEDSWIN
+            if "[GEMINI SUPERVISOR]" in msg or "[MEDSWIN]" in msg or "[MAC]" in msg:
+                # Remove timestamp and logger name for cleaner display
+                # Format: "timestamp - logger - level - message"
+                parts = msg.split(" - ", 3)
+                if len(parts) >= 4:
+                    clean_msg = parts[-1]  # Get the message part
+                else:
+                    clean_msg = msg
+                with self.lock:
+                    self.thoughts.append(clean_msg)
+        except Exception:
+            pass  # Ignore formatting errors
+    
+    def get_thoughts(self):
+        """Get all captured thoughts as a formatted string"""
+        with self.lock:
+            return "\n".join(self.thoughts)
+    
+    def clear(self):
+        """Clear captured thoughts"""
+        with self.lock:
+            self.thoughts = []
 # Set MCP client logging to WARNING to reduce noise
 mcp_client_logger = logging.getLogger("mcp.client")
 mcp_client_logger.setLevel(logging.WARNING)
@@ -2159,11 +2195,20 @@ def stream_chat(
     medical_model: str,
     use_web_search: bool,
     disable_agentic_reasoning: bool,
+    show_thoughts: bool,
     request: gr.Request
 ):
     if not request:
-        yield history + [{"role": "assistant", "content": "Session initialization failed. Please refresh the page."}]
+        yield history + [{"role": "assistant", "content": "Session initialization failed. Please refresh the page."}], ""
         return
+    
+    # Set up thought capture handler if show_thoughts is enabled
+    thought_handler = None
+    if show_thoughts:
+        thought_handler = ThoughtCaptureHandler()
+        thought_handler.setLevel(logging.INFO)
+        thought_handler.clear()  # Start fresh
+        logger.addHandler(thought_handler)
     
     session_start = time.time()
     soft_timeout = 100
@@ -2287,7 +2332,8 @@ def stream_chat(
         {"role": "user", "content": original_message},
         {"role": "assistant", "content": ""}
     ]
-    yield updated_history
+    thoughts_text = thought_handler.get_thoughts() if thought_handler else ""
+    yield updated_history, thoughts_text
     
     for idx, sub_topic in enumerate(breakdown.get("sub_topics", []), 1):
         if elapsed() >= hard_timeout - 5:
@@ -2329,7 +2375,8 @@ def stream_chat(
             # Stream partial answer as we complete each task
             partial_final = "\n\n".join(medswin_answers)
             updated_history[-1]["content"] = partial_final
-            yield updated_history
+            thoughts_text = thought_handler.get_thoughts() if thought_handler else ""
+            yield updated_history, thoughts_text
     
         except Exception as e:
             logger.error(f"[MEDSWIN] Task {idx} failed: {e}")
@@ -2449,7 +2496,12 @@ def stream_chat(
         
     # Update history with final answer (ONLY final answer, no internal thoughts)
     updated_history[-1]["content"] = final_answer_with_metadata
-    yield updated_history
+    thoughts_text = thought_handler.get_thoughts() if thought_handler else ""
+    yield updated_history, thoughts_text
+    
+    # Clean up thought handler
+    if thought_handler:
+        logger.removeHandler(thought_handler)
             
     # Log completion
     logger.info(f"[MAC] Final answer generated: {len(final_answer)} chars, {len(breakdown.get('sub_topics', []))} tasks completed")
@@ -2601,6 +2653,20 @@ def create_demo():
                             label="Disable agentic reasoning",
                             info="Use MedSwin model alone without agentic reasoning, RAG, or web search"
                         )
+                        show_agentic_thought = gr.Button(
+                            "Show agentic thought",
+                            size="sm"
+                        )
+                    # Scrollable textbox for agentic thoughts (initially hidden)
+                    agentic_thoughts_box = gr.Textbox(
+                        label="Agentic Thoughts",
+                        placeholder="Internal thoughts from MedSwin and supervisor will appear here...",
+                        lines=8,
+                        max_lines=15,
+                        interactive=False,
+                        visible=False,
+                        elem_classes="agentic-thoughts"
+                    )
                     with gr.Row():
                         use_rag = gr.Checkbox(
                             value=False,
@@ -2680,6 +2746,20 @@ def create_demo():
                             label="Merge Threshold (lower = more merging)"
                         )
 
+                # Toggle function for showing/hiding agentic thoughts
+                show_thoughts_state = gr.State(value=False)
+                
+                def toggle_thoughts_box(current_state):
+                    """Toggle visibility of agentic thoughts box"""
+                    new_state = not current_state
+                    return gr.update(visible=new_state), new_state
+                
+                show_agentic_thought.click(
+                    fn=toggle_thoughts_box,
+                    inputs=[show_thoughts_state],
+                    outputs=[agentic_thoughts_box, show_thoughts_state]
+                )
+                
                 submit_button.click(
                     fn=stream_chat,
                     inputs=[
@@ -2696,9 +2776,10 @@ def create_demo():
                         use_rag,
                         medical_model,
                         use_web_search,
-                        disable_agentic_reasoning
+                        disable_agentic_reasoning,
+                        show_thoughts_state
                     ],
-                    outputs=chatbot
+                    outputs=[chatbot, agentic_thoughts_box]
                 )
                 
                 message_input.submit(
@@ -2717,9 +2798,10 @@ def create_demo():
                         use_rag,
                         medical_model,
                         use_web_search,
-                        disable_agentic_reasoning
+                        disable_agentic_reasoning,
+                        show_thoughts_state
                     ],
-                    outputs=chatbot
+                    outputs=[chatbot, agentic_thoughts_box]
                 )
 
     return demo
