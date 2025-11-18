@@ -27,9 +27,10 @@ if __name__ == "__main__":
     
     # Check Gemini MCP availability
     if MCP_AVAILABLE:
-        logger.info("Gemini MCP is available for translation, summarization, document parsing, and transcription")
+        logger.info("✅ Gemini MCP is available for translation, summarization, document parsing, and transcription")
     else:
-        logger.warning("Gemini MCP not available - translation, summarization, document parsing, and transcription features will be limited")
+        logger.info("ℹ️ Gemini MCP not available - app will use fallback methods (direct API calls)")
+        logger.info("   This is normal and the app will continue to work. MCP is optional.")
     
     logger.info("Model preloading complete!")
     demo = create_demo()

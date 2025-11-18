@@ -23,6 +23,12 @@ try:
     )
 except ImportError as e:
     logger.warning(f"MCP SDK not available: {e}")
+    logger.info("The app will continue to work with fallback functionality (direct API calls)")
+    MCP_AVAILABLE = False
+    MCP_CLIENT_INFO = None
+except Exception as e:
+    logger.error(f"Unexpected error initializing MCP: {e}")
+    logger.info("The app will continue to work with fallback functionality")
     MCP_AVAILABLE = False
     MCP_CLIENT_INFO = None
 

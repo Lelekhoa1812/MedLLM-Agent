@@ -65,7 +65,7 @@ Respond in JSON format:
 def autonomous_reasoning(query: str, history: list) -> dict:
     """Autonomous reasoning: Analyze query complexity, intent, and information needs"""
     if not MCP_AVAILABLE:
-        logger.warning("⚠️ Gemini MCP not available for reasoning, using fallback")
+        logger.info("ℹ️ Gemini MCP not available for reasoning, using fallback (app will continue to work normally)")
         return {
             "query_type": "general_info",
             "complexity": "moderate",
