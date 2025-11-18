@@ -2002,7 +2002,7 @@ def stream_chat(
                 penalty=penalty
             )
             
-            # Format task answer with topic header
+            # Format task answer with topic header 
             formatted_answer = f"## {topic_name}\n\n{task_answer}"
             medswin_answers.append(formatted_answer)
             logger.info(f"[MEDSWIN] Task {idx} completed: {len(task_answer)} chars")
