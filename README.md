@@ -59,9 +59,12 @@ tags:
 - **Text-to-Speech**: Voice output generation using Maya1 TTS model (optional, fallback to MCP if unavailable) plus a one-click "Play Response" control for the latest answer
 
 ### 🤝 **MAC Architecture (Multi-Agent Collaboration)**
-- **Gemini Supervisor**: Orchestrates query processing by breaking queries into 2-4 focused sub-topics (JSON format)
+- **Gemini Supervisor**: Orchestrates query processing by breaking queries into flexible sub-topics (up to 10 based on complexity, explores different approaches)
 - **MedSwin Specialist**: Executes tasks sequentially, providing concise clinical answers
+- **Enhanced Synthesis**: Supervisor synthesizes all MedSwin responses with clear context into comprehensive final answers
+- **Iterative Improvement**: Supervisor challenges and enhances answers until confirmed optimal (up to 2 iterations)
 - **Search Mode**: Gemini creates 1-4 search strategies → executes ddgs searches (1-2 sources each) → summarizes briefly
+- **Conditional Search Trigger**: When search mode enabled, supervisor can trigger additional searches if answer is unclear or has gaps
 - **RAG Mode**: Gemini brainstorms retrieved documents into 1-4 short contexts for MedSwin decision-making
 - **Clean Output**: All internal thoughts/conversations are logged only; users see only the final answer
 - **Markdown Format**: Final answers use bullet points (tables automatically converted)
@@ -152,8 +155,11 @@ MedLLM Agent is designed to support **doctors, clinicians, and medical specialis
 
 #### 1. **MAC Architecture (Multi-Agent Collaboration)**
 - **Gemini Supervisor Agent**: 
-  - Breaks user queries into 2-4 focused sub-topics (JSON format)
+  - Breaks user queries into flexible sub-topics (up to 10 based on complexity, explores different approaches/angles)
+  - Synthesizes all MedSwin responses with clear context into comprehensive final answers
+  - Challenges and enhances answers iteratively until confirmed optimal (up to 2 iterations)
   - In search mode: creates 1-4 search strategies, executes ddgs (1-2 sources each), summarizes briefly
+  - Conditional search trigger: Can trigger additional searches if answer is unclear or has gaps (only when search mode enabled)
   - In RAG mode: brainstorms retrieved documents into 1-4 concise contexts
   - All supervisor decisions logged internally, not displayed
   
@@ -196,9 +202,11 @@ MedLLM Agent is designed to support **doctors, clinicians, and medical specialis
 
 ### **How It Works: MAC Architecture in Action**
 
-1. **Gemini Supervisor - Query Breakdown** → Analyzes query and breaks into 2-4 sub-topics (JSON):
+1. **Gemini Supervisor - Query Breakdown** → Analyzes query and breaks into flexible sub-topics (up to 10 based on complexity):
    - Example: "What are the treatment options for Type 2 diabetes in elderly patients with renal impairment?"
-   - Creates structured sub-topics: treatment options, age considerations, renal function impact
+   - Explores different approaches (clinical, diagnostic, treatment, prevention perspectives)
+   - Creates structured sub-topics: treatment options, age considerations, renal function impact, drug interactions, monitoring protocols
+   - Number of subtasks adapts to query complexity (not limited to 4)
    - All planning logged internally, not displayed to user
 
 2. **Gemini Supervisor - Context Preparation**:
@@ -212,8 +220,26 @@ MedLLM Agent is designed to support **doctors, clinicians, and medical specialis
    - Generates concise clinical answers (Markdown bullets, no tables)
    - All execution logged internally
 
-4. **Final Answer Assembly**:
-   - Combines all MedSwin task answers
+4. **Gemini Supervisor - Answer Synthesis**:
+   - Synthesizes all MedSwin responses with clear context
+   - Integrates information from all sub-topics seamlessly
+   - Creates coherent, comprehensive final answer
+   - Provides better context than simple concatenation
+
+5. **Gemini Supervisor - Challenge & Enhancement Loop**:
+   - Evaluates answer quality (completeness, accuracy, clarity)
+   - Challenges answer if not optimal
+   - Provides specific enhancement instructions
+   - Enhances answer iteratively (up to 2 iterations)
+   - Continues until answer confirmed optimal
+
+6. **Conditional Search Trigger** (only when search mode enabled):
+   - Supervisor checks if answer is unclear or has gaps
+   - If needed, generates specific search queries to fill gaps
+   - Executes additional searches
+   - Enhances answer with new search context
+
+7. **Final Answer Assembly**:
    - Converts any tables to Markdown bullets
    - Adds citations if web sources used
    - Translates back if needed
@@ -225,7 +251,10 @@ MedLLM Agent is designed to support **doctors, clinicians, and medical specialis
 ✅ **Evidence-Based Decisions**: Grounds answers in uploaded documents and current medical literature  
 ✅ **Reduced Hallucination**: RAG ensures answers are based on actual documents and verified sources  
 ✅ **Comprehensive Coverage**: Combines institutional knowledge (documents) with current medical knowledge (web)  
-✅ **Quality Assurance**: Self-reflection ensures high-quality, complete answers  
+✅ **Enhanced Quality**: Iterative challenge loop ensures answers are optimal before delivery  
+✅ **Flexible Task Breakdown**: Adapts to query complexity with flexible subtask generation (not limited to 4 steps)  
+✅ **Intelligent Search**: Conditional search trigger fills gaps when answers are unclear  
+✅ **Better Context**: Enhanced synthesis provides clearer, more comprehensive final answers  
 ✅ **Scalability**: Handles multiple languages, complex queries, and large document libraries  
 ✅ **Clinical Workflow Integration**: Designed to fit into existing clinical decision-making processes  
 ✅ **MCP Protocol**: Standardized tool integration for reliable, maintainable web search capabilities
