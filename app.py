@@ -6,6 +6,7 @@ import torch
 import threading
 import time
 import json
+import concurrent.futures
 from transformers import (
     AutoModelForCausalLM,
     AutoTokenizer,
@@ -241,6 +242,7 @@ global_medical_models = {}
 global_medical_tokenizers = {}
 global_file_info = {}
 global_tts_model = None
+global_embed_model = None
 
 # MCP client storage
 global_mcp_session = None
@@ -358,6 +360,45 @@ async def get_mcp_session():
         global_mcp_stdio_ctx = None
         return None
 
+MCP_TOOLS_CACHE_TTL = int(os.environ.get("MCP_TOOLS_CACHE_TTL", "60"))
+global_mcp_tools_cache = {"timestamp": 0.0, "tools": None}
+
+
+def invalidate_mcp_tools_cache():
+    """Invalidate cached MCP tool metadata"""
+    global global_mcp_tools_cache
+    global_mcp_tools_cache = {"timestamp": 0.0, "tools": None}
+
+
+async def get_cached_mcp_tools(force_refresh: bool = False):
+    """Return cached MCP tools list to avoid repeated list_tools calls"""
+    global global_mcp_tools_cache
+    if not MCP_AVAILABLE:
+        return []
+    
+    now = time.time()
+    if (
+        not force_refresh
+        and global_mcp_tools_cache["tools"]
+        and now - global_mcp_tools_cache["timestamp"] < MCP_TOOLS_CACHE_TTL
+    ):
+        return global_mcp_tools_cache["tools"]
+    
+    session = await get_mcp_session()
+    if session is None:
+        return []
+    
+    try:
+        tools_resp = await session.list_tools()
+        tools_list = list(getattr(tools_resp, "tools", []) or [])
+        global_mcp_tools_cache = {"timestamp": now, "tools": tools_list}
+        return tools_list
+    except Exception as e:
+        logger.error(f"Failed to refresh MCP tools: {e}")
+        invalidate_mcp_tools_cache()
+        return []
+
+
 async def call_agent(user_prompt: str, system_prompt: str = None, files: list = None, model: str = None, temperature: float = 0.2) -> str:
     """Call Gemini MCP generate_content tool"""
     if not MCP_AVAILABLE:
@@ -370,27 +411,23 @@ async def call_agent(user_prompt: str, system_prompt: str = None, files: list = 
             logger.warning("Failed to get MCP session for Gemini call")
             return ""
         
-        # List tools - session is fully initialized via ClientSession.initialize()
-        try:
-            tools = await session.list_tools()
-        except Exception as e:
-            logger.error(f"❌ Failed to list MCP tools: {e}")
+        tools = await get_cached_mcp_tools()
+        if not tools:
+            tools = await get_cached_mcp_tools(force_refresh=True)
+        if not tools:
+            logger.error("Unable to obtain MCP tool catalog for Gemini calls")
             return ""
         
-        if not tools or not hasattr(tools, 'tools'):
-            logger.error("Invalid tools response from MCP server")
-            return ""
-        
-        # Find generate_content tool
         generate_tool = None
-        for tool in tools.tools:
+        for tool in tools:
             if tool.name == "generate_content" or "generate_content" in tool.name.lower():
                 generate_tool = tool
                 logger.info(f"Found Gemini MCP tool: {tool.name}")
                 break
         
         if not generate_tool:
-            logger.warning(f"Gemini MCP generate_content tool not found. Available tools: {[t.name for t in tools.tools]}")
+            logger.warning(f"Gemini MCP generate_content tool not found. Available tools: {[t.name for t in tools]}")
+            invalidate_mcp_tools_cache()
             return ""
         
         # Prepare arguments
@@ -456,6 +493,15 @@ def initialize_tts_model():
             logger.warning("TTS features will be disabled. If pyworld dependency is missing, try: pip install TTS --no-deps && pip install coqui-tts")
             global_tts_model = None
     return global_tts_model
+
+
+def get_or_create_embed_model():
+    """Reuse embedding model to avoid reloading weights each request"""
+    global global_embed_model
+    if global_embed_model is None:
+        logger.info("Initializing shared embedding model for RAG retrieval...")
+        global_embed_model = HuggingFaceEmbedding(model_name=EMBEDDING_MODEL, token=HF_TOKEN)
+    return global_embed_model
 
 async def transcribe_audio_gemini(audio_path: str) -> str:
     """Transcribe audio using Gemini MCP"""
@@ -738,44 +784,32 @@ async def search_web_mcp_tool(query: str, max_results: int = 5) -> list:
         return []
     
     try:
-        session = await get_mcp_session()
-        if session is None:
+        tools = await get_cached_mcp_tools()
+        if not tools:
             return []
         
-        # List tools - session should be ready after proper initialization
-        # Add a small delay to ensure server has fully processed initialization
-        await asyncio.sleep(0.1)
-        try:
-            tools = await session.list_tools()
-        except Exception as e:
-            error_msg = str(e)
-            # Check if it's an initialization error
-            if "initialization" in error_msg.lower() or "before initialization" in error_msg.lower():
-                logger.warning(f"⚠️ Server not ready yet, waiting a bit more...: {error_msg}")
-                await asyncio.sleep(0.5)
-                try:
-                    tools = await session.list_tools()
-                except Exception as retry_error:
-                    logger.error(f"Failed to list MCP tools after retry: {retry_error}")
-                    return []
-            else:
-                logger.error(f"Failed to list MCP tools: {error_msg}")
-                return []
-        
-        if not tools or not hasattr(tools, 'tools'):
-            return []
-        
-        # Look for web search tools (DuckDuckGo, search, etc.)
         search_tool = None
-        for tool in tools.tools:
+        for tool in tools:
             tool_name_lower = tool.name.lower()
             if any(keyword in tool_name_lower for keyword in ["search", "duckduckgo", "ddg", "web"]):
                 search_tool = tool
                 logger.info(f"Found web search MCP tool: {tool.name}")
                 break
         
+        if not search_tool:
+            tools = await get_cached_mcp_tools(force_refresh=True)
+            for tool in tools:
+                tool_name_lower = tool.name.lower()
+                if any(keyword in tool_name_lower for keyword in ["search", "duckduckgo", "ddg", "web"]):
+                    search_tool = tool
+                    logger.info(f"Found web search MCP tool after refresh: {tool.name}")
+                    break
+        
         if search_tool:
             try:
+                session = await get_mcp_session()
+                if session is None:
+                    return []
                 # Call the search tool
                 result = await session.call_tool(
                     search_tool.name,
@@ -823,7 +857,9 @@ async def search_web_mcp_tool(query: str, max_results: int = 5) -> list:
             except Exception as e:
                 logger.error(f"Error calling web search MCP tool: {e}")
         
-        return []
+        else:
+            logger.debug("No MCP web search tool discovered in current catalog")
+            return []
     except Exception as e:
         logger.error(f"Web search MCP tool error: {e}")
         return []
@@ -2084,7 +2120,7 @@ def create_or_update_index(files, request: gr.Request):
     save_dir = f"./{user_id}_index"
     # Initialize LlamaIndex modules
     llm = get_llm_for_rag()
-    embed_model = HuggingFaceEmbedding(model_name=EMBEDDING_MODEL, token=HF_TOKEN)
+    embed_model = get_or_create_embed_model()
     Settings.llm = llm
     Settings.embed_model = embed_model
     file_stats = []
@@ -2228,14 +2264,56 @@ def stream_chat(
     original_message = message
     needs_translation = original_lang != "en"
     
+    pipeline_diagnostics = {
+        "reasoning": None,
+        "plan": None,
+        "strategy_decisions": [],
+        "stage_metrics": {},
+        "search": {"strategies": [], "total_results": 0}
+    }
+
+    def record_stage(stage_name: str, start_time: float):
+        pipeline_diagnostics["stage_metrics"][stage_name] = round(time.time() - start_time, 3)
+    
+    translation_stage_start = time.time()
     if needs_translation:
         logger.info(f"[GEMINI SUPERVISOR] Detected non-English language: {original_lang}, translating...")
         message = translate_text(message, target_lang="en", source_lang=original_lang)
         logger.info(f"[GEMINI SUPERVISOR] Translated query: {message[:100]}...")
+    record_stage("translation", translation_stage_start)
     
     # Determine final modes (respect user settings and availability)
     final_use_rag = use_rag and has_rag_index and not disable_agentic_reasoning
     final_use_web_search = use_web_search and not disable_agentic_reasoning
+    
+    plan = None
+    if not disable_agentic_reasoning:
+        reasoning_stage_start = time.time()
+        reasoning = autonomous_reasoning(message, history)
+        record_stage("autonomous_reasoning", reasoning_stage_start)
+        pipeline_diagnostics["reasoning"] = reasoning
+        plan = create_execution_plan(reasoning, message, has_rag_index)
+        pipeline_diagnostics["plan"] = plan
+        execution_strategy = autonomous_execution_strategy(
+            reasoning, plan, final_use_rag, final_use_web_search, has_rag_index
+        )
+        
+        if final_use_rag and not reasoning.get("requires_rag", True):
+            final_use_rag = False
+            pipeline_diagnostics["strategy_decisions"].append("Skipped RAG per autonomous reasoning")
+        elif not final_use_rag and reasoning.get("requires_rag", True) and not has_rag_index:
+            pipeline_diagnostics["strategy_decisions"].append("Reasoning wanted RAG but no index available")
+        
+        if final_use_web_search and not reasoning.get("requires_web_search", False):
+            final_use_web_search = False
+            pipeline_diagnostics["strategy_decisions"].append("Skipped web search per autonomous reasoning")
+        elif not final_use_web_search and reasoning.get("requires_web_search", False):
+            if not use_web_search:
+                pipeline_diagnostics["strategy_decisions"].append("User disabled web search despite reasoning request")
+            else:
+                pipeline_diagnostics["strategy_decisions"].append("Web search requested by reasoning but disabled by mode")
+    else:
+        pipeline_diagnostics["strategy_decisions"].append("Agentic reasoning disabled by user")
     
     # ===== STEP 1: GEMINI SUPERVISOR - Break query into sub-topics =====
     if disable_agentic_reasoning:
@@ -2257,19 +2335,68 @@ def stream_chat(
     search_contexts = []
     web_urls = []
     if final_use_web_search:
+        search_stage_start = time.time()
         logger.info("[GEMINI SUPERVISOR] Search mode: Creating search strategies...")
         search_strategies = gemini_supervisor_search_strategies(message, elapsed())
         
         # Execute searches for each strategy
         all_search_results = []
+        strategy_jobs = []
         for strategy in search_strategies.get("search_strategies", [])[:4]:  # Max 4 strategies
             search_query = strategy.get("strategy", message)
             target_sources = strategy.get("target_sources", 2)
-            logger.info(f"[GEMINI SUPERVISOR] Executing search: {search_query} (target: {target_sources} sources)")
-            
-            results = search_web(search_query, max_results=target_sources)
-            all_search_results.extend(results)
-            web_urls.extend([r.get('url', '') for r in results if r.get('url')])
+            strategy_jobs.append({
+                "query": search_query,
+                "target_sources": target_sources,
+                "meta": strategy
+            })
+        
+        def execute_search(job):
+            job_start = time.time()
+            try:
+                results = search_web(job["query"], max_results=job["target_sources"])
+                duration = time.time() - job_start
+                return results, duration, None
+            except Exception as exc:
+                return [], time.time() - job_start, exc
+        
+        def record_search_diag(job, duration, results_count, error=None):
+            entry = {
+                "query": job["query"],
+                "target_sources": job["target_sources"],
+                "duration": round(duration, 3),
+                "results": results_count
+            }
+            if error:
+                entry["error"] = str(error)
+            pipeline_diagnostics["search"]["strategies"].append(entry)
+        
+        if strategy_jobs:
+            max_workers = min(len(strategy_jobs), 4)
+            if len(strategy_jobs) > 1:
+                with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+                    future_map = {executor.submit(execute_search, job): job for job in strategy_jobs}
+                    for future in concurrent.futures.as_completed(future_map):
+                        job = future_map[future]
+                        try:
+                            results, duration, error = future.result()
+                        except Exception as exc:
+                            results, duration, error = [], 0.0, exc
+                        record_search_diag(job, duration, len(results), error)
+                        if not error and results:
+                            all_search_results.extend(results)
+                            web_urls.extend([r.get('url', '') for r in results if r.get('url')])
+            else:
+                job = strategy_jobs[0]
+                results, duration, error = execute_search(job)
+                record_search_diag(job, duration, len(results), error)
+                if not error and results:
+                    all_search_results.extend(results)
+                    web_urls.extend([r.get('url', '') for r in results if r.get('url')])
+        else:
+            pipeline_diagnostics["strategy_decisions"].append("No viable web search strategies returned")
+        
+        pipeline_diagnostics["search"]["total_results"] = len(all_search_results)
         
         # Summarize search results with Gemini
         if all_search_results:
@@ -2278,16 +2405,18 @@ def stream_chat(
             if search_summary:
                 search_contexts.append(search_summary)
                 logger.info(f"[GEMINI SUPERVISOR] Search summary created: {len(search_summary)} chars")
+        record_stage("web_search", search_stage_start)
     
     # ===== STEP 3: GEMINI SUPERVISOR - Handle RAG Mode =====
     rag_contexts = []
     if final_use_rag and has_rag_index:
+        rag_stage_start = time.time()
         if elapsed() >= soft_timeout - 10:
             logger.warning("[GEMINI SUPERVISOR] Skipping RAG due to time pressure")
             final_use_rag = False
         else:
             logger.info("[GEMINI SUPERVISOR] RAG mode: Retrieving documents...")
-            embed_model = HuggingFaceEmbedding(model_name=EMBEDDING_MODEL, token=HF_TOKEN)
+            embed_model = get_or_create_embed_model()
             Settings.embed_model = embed_model
             storage_context = StorageContext.from_defaults(persist_dir=index_dir)
             index = load_index_from_storage(storage_context, settings=Settings)
@@ -2307,6 +2436,7 @@ def stream_chat(
             rag_brainstorm = gemini_supervisor_rag_brainstorm(message, retrieved_docs, elapsed())
             rag_contexts = [ctx.get("context", "") for ctx in rag_brainstorm.get("contexts", [])]
             logger.info(f"[GEMINI SUPERVISOR] Created {len(rag_contexts)} RAG contexts")
+        record_stage("rag_retrieval", rag_stage_start)
     
     # ===== STEP 4: MEDSWIN SPECIALIST - Execute tasks sequentially =====
     # Initialize medical model
@@ -2335,6 +2465,7 @@ def stream_chat(
     thoughts_text = thought_handler.get_thoughts() if thought_handler else ""
     yield updated_history, thoughts_text
     
+    medswin_stage_start = time.time()
     for idx, sub_topic in enumerate(breakdown.get("sub_topics", []), 1):
         if elapsed() >= hard_timeout - 5:
             logger.warning(f"[MEDSWIN] Time limit approaching, stopping at task {idx}")
@@ -2382,11 +2513,14 @@ def stream_chat(
             logger.error(f"[MEDSWIN] Task {idx} failed: {e}")
             # Continue with next task
             continue
+    record_stage("medswin_tasks", medswin_stage_start)
     
     # ===== STEP 5: GEMINI SUPERVISOR - Synthesize final answer with clear context =====
     logger.info("[GEMINI SUPERVISOR] Synthesizing final answer from all MedSwin responses...")
     raw_medswin_answers = [ans.split('\n\n', 1)[1] if '\n\n' in ans else ans for ans in medswin_answers]  # Remove headers for synthesis
+    synthesis_stage_start = time.time()
     final_answer = gemini_supervisor_synthesize(message, raw_medswin_answers, rag_contexts, search_contexts, breakdown)
+    record_stage("synthesis", synthesis_stage_start)
     
     if not final_answer or len(final_answer.strip()) < 50:
         # Fallback to simple concatenation if synthesis fails
@@ -2411,6 +2545,7 @@ def stream_chat(
     # ===== STEP 6: GEMINI SUPERVISOR - Challenge and enhance answer iteratively =====
     max_challenge_iterations = 2  # Limit iterations to avoid timeout
     challenge_iteration = 0
+    challenge_stage_start = time.time()
     
     while challenge_iteration < max_challenge_iterations and elapsed() < soft_timeout - 15:
         challenge_iteration += 1
@@ -2438,23 +2573,37 @@ def stream_chat(
         else:
             logger.info("[GEMINI SUPERVISOR] Enhancement did not improve answer significantly, stopping")
             break
+    record_stage("challenge_loop", challenge_stage_start)
     
     # ===== STEP 7: Conditional search trigger (only when search mode enabled) =====
     if final_use_web_search and elapsed() < soft_timeout - 10:
         logger.info("[GEMINI SUPERVISOR] Checking if additional search is needed...")
+        clarity_stage_start = time.time()
         clarity_check = gemini_supervisor_check_clarity(message, final_answer, final_use_web_search)
+        record_stage("clarity_check", clarity_stage_start)
         
         if clarity_check.get("needs_search", False) and clarity_check.get("search_queries"):
             logger.info(f"[GEMINI SUPERVISOR] Triggering additional search: {clarity_check.get('search_queries', [])}")
             additional_search_results = []
+            followup_stage_start = time.time()
             for search_query in clarity_check.get("search_queries", [])[:3]:  # Limit to 3 additional searches
                 if elapsed() >= soft_timeout - 5:
                     break
+                extra_start = time.time()
                 results = search_web(search_query, max_results=2)
+                extra_duration = time.time() - extra_start
+                pipeline_diagnostics["search"]["strategies"].append({
+                    "query": search_query,
+                    "target_sources": 2,
+                    "duration": round(extra_duration, 3),
+                    "results": len(results),
+                    "type": "followup"
+                })
                 additional_search_results.extend(results)
                 web_urls.extend([r.get('url', '') for r in results if r.get('url')])
             
             if additional_search_results:
+                pipeline_diagnostics["search"]["total_results"] += len(additional_search_results)
                 logger.info(f"[GEMINI SUPERVISOR] Summarizing {len(additional_search_results)} additional search results...")
                 additional_summary = summarize_web_content(additional_search_results, message)
                 if additional_summary:
@@ -2469,6 +2618,7 @@ def stream_chat(
                     if enhanced_with_search and len(enhanced_with_search.strip()) > 50:
                         final_answer = enhanced_with_search
                         logger.info("[GEMINI SUPERVISOR] Answer enhanced with additional search context")
+            record_stage("followup_search", followup_stage_start)
     
     citations_text = ""
     
@@ -2477,18 +2627,18 @@ def stream_chat(
     if needs_translation and final_answer:
         logger.info(f"[GEMINI SUPERVISOR] Translating response back to {original_lang}...")
         final_answer = translate_text(final_answer, target_lang=original_lang, source_lang="en")
+    
+    # Add citations if web sources were used
+    if web_urls:
+        unique_urls = list(dict.fromkeys(web_urls))  # Preserve order, remove duplicates
+        citation_links = []
+        for url in unique_urls[:5]:  # Limit to 5 citations
+            domain = format_url_as_domain(url)
+            if domain:
+                citation_links.append(f"[{domain}]({url})")
         
-        # Add citations if web sources were used
-        if web_urls:
-            unique_urls = list(dict.fromkeys(web_urls))  # Preserve order, remove duplicates
-            citation_links = []
-            for url in unique_urls[:5]:  # Limit to 5 citations
-                domain = format_url_as_domain(url)
-                if domain:
-                    citation_links.append(f"[{domain}]({url})")
-            
-            if citation_links:
-                citations_text = "\n\n**Sources:** " + ", ".join(citation_links)
+        if citation_links:
+            citations_text = "\n\n**Sources:** " + ", ".join(citation_links)
         
     # Add speaker icon
     speaker_icon = ' 🔊'
@@ -2504,6 +2654,15 @@ def stream_chat(
         logger.removeHandler(thought_handler)
             
     # Log completion
+    diag_summary = {
+        "stage_metrics": pipeline_diagnostics["stage_metrics"],
+        "decisions": pipeline_diagnostics["strategy_decisions"],
+        "search": pipeline_diagnostics["search"],
+    }
+    try:
+        logger.info(f"[MAC] Diagnostics summary: {json.dumps(diag_summary)[:1200]}")
+    except Exception:
+        logger.info(f"[MAC] Diagnostics summary (non-serializable)")
     logger.info(f"[MAC] Final answer generated: {len(final_answer)} chars, {len(breakdown.get('sub_topics', []))} tasks completed")
 
 def generate_speech_for_message(text: str):

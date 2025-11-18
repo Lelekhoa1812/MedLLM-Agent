@@ -8,7 +8,7 @@ sdk_version: 5.49.1
 app_file: app.py
 pinned: false
 license: mit
-short_description: 'MedicalMCP RAG & Search with MedSwin'
+short_description: 'Medical MCP agentic RAG & Search with MedSwin'
 tags:
   - mcp-in-action-track-enterprise
   - mcp-in-action-track-creative
@@ -69,6 +69,11 @@ tags:
 - **Clean Output**: All internal thoughts/conversations are logged only; users see only the final answer
 - **Markdown Format**: Final answers use bullet points (tables automatically converted)
 - **Deterministic Mode**: `Disable agentic reasoning` switch runs MedSwin alone for offline-friendly, model-only answers
+
+### ⚡ **Adaptive Strategy & Diagnostics**
+- **Autonomous Planner**: Gemini reasoning now enables/disables RAG and web search dynamically per query while respecting user toggles.
+- **Parallel Search Flow**: Multi-strategy web lookups run concurrently with cached MCP tool discovery and shared embeddings to cut latency.
+- **Pipeline Telemetry**: Every session logs stage durations, strategy decisions, and search outcomes for fast troubleshooting and quality tracking.
 
 ### ⚙️ **Advanced Configuration**
 - Customizable generation parameters (temperature, top-p, top-k)
